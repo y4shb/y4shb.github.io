@@ -1,0 +1,35 @@
+:root {
+  /* palette */
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --surface-2: #1c1c1f;
+  --text: #ededed;
+  --muted: #8a8f98;
+  --faint: #6b7079;
+  --border: #2a2a30;
+  --border-hover: #3a3a44;
+  --accent: #d64545;
+  --accent-soft: #7a2a2a;
+
+  /* type */
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* spacing scale */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 24px;
+  --s6: 32px; --s7: 48px; --s8: 64px; --s9: 96px; --s10: 128px;
+
+  /* layout */
+  --content-max: 1080px;
+  --hero-max: 1280px;
+  --section-pad: 96px;
+  --nav-h: 64px;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --fade-dur: 400ms;
+}
+
+@media (max-width: 768px) {
+  :root { --section-pad: 64px; }
+}

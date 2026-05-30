@@ -1,0 +1,17 @@
+# brainstorm + workflow scratch (never publish)
+.superpowers/
+
+# experimental demo/candidate builds (kept locally, not shipped)
+demos/
+
+# internal design docs / specs
+docs/
+
+# OS / editor / deps / build
+.DS_Store
+**/.DS_Store
+node_modules/
+dist/
+.cache/
+*.log
+.vscode/
