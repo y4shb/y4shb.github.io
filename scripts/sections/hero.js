@@ -87,7 +87,7 @@ export default function init(mount, ctx) {
   // ---- build terminal shell inside mount ----
   const term = document.createElement('main');
   term.className = 'hv2-term';
-  term.setAttribute('aria-label', 'terminal: yash@amd');
+  term.setAttribute('aria-label', 'terminal: yash@y4sh');
 
   const bar = document.createElement('div');
   bar.className = 'hv2-bar';
@@ -101,7 +101,7 @@ export default function init(mount, ctx) {
   }
   const title = document.createElement('div');
   title.className = 'hv2-title';
-  title.textContent = 'yash@amd: ~';
+  title.textContent = 'yash@y4sh: ~';
   bar.append(dots, title);
 
   const body = document.createElement('div');
@@ -133,7 +133,7 @@ export default function init(mount, ctx) {
     // defensive: build minimal copy if markup missing
     const eb = document.createElement('p');
     eb.className = 'hero-eyebrow';
-    eb.textContent = 'SR. SDE / AMD / DCAUTO / MI450';
+    eb.textContent = 'SOFTWARE ENGINEER / BACKEND & DEVELOPER TOOLS';
     copy.appendChild(eb);
   }
 
