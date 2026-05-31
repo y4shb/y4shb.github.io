@@ -70,6 +70,9 @@ a.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; b
 .exp-role { font-size: clamp(20px, 2.4vw, 24px); line-height: 1.25; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 6px; }
 .exp-at { color: var(--accent); font-weight: 500; }
 .exp-role-logo { width: auto; vertical-align: -0.08em; margin-left: 0.1em; }
+.exp-role-link { text-decoration: none; display: inline-block; transition: opacity 0.18s ease; }
+.exp-role-link:hover { opacity: 0.65; }
+.exp-role-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .exp-panel[data-panel="amd"] .exp-role-logo { height: 0.62em; }
 .exp-panel[data-panel="qualcomm"] .exp-role-logo { height: 0.92em; }
 .exp-panel[data-panel="licious"] .exp-role-logo { height: 1.05em; }

@@ -104,6 +104,27 @@ document.querySelectorAll('.brand[data-logo]').forEach(slot => {
   slot.appendChild(vh);
 });
 
+/* ---- experience: link the role-heading company logos to their newsrooms ---- */
+const COMPANY_URL = {
+  amd: 'https://www.amd.com/en/newsroom.html',
+  qualcomm: 'https://www.qualcomm.com/news/releases',
+  licious: 'https://www.licious.in/',
+};
+document.querySelectorAll('.exp-panel[data-panel]').forEach(panel => {
+  const url = COMPANY_URL[panel.getAttribute('data-panel')];
+  if (!url) return;
+  panel.querySelectorAll('.exp-role-logo').forEach(logo => {
+    if (logo.closest('.exp-role-link')) return;
+    const a = document.createElement('a');
+    a.className = 'exp-role-link';
+    a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    logo.parentNode.insertBefore(a, logo);
+    a.appendChild(logo);
+    const next = a.nextSibling;
+    if (next && next.nodeType === 1 && next.classList.contains('vh')) a.appendChild(next);
+  });
+});
+
 /* ---- lazy visual modules ---- */
 const ctx = { reducedMotion };
 const mounts = document.querySelectorAll('[data-viz]');
