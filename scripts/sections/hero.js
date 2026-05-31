@@ -42,7 +42,7 @@ function injectStyle() {
 .hv2-cmd-text{color:${C.text};white-space:pre;}
 .hv2-caret{display:inline-block;width:8px;height:1.05em;transform:translateY(2px);margin-left:1px;background:${C.accent};animation:hv2blink 1s steps(1) infinite;}
 @keyframes hv2blink{50%{opacity:0;}}
-@media (prefers-reduced-motion: reduce){.hv2-caret,.hv2-copy .hero-title .hero-caret{animation:none;}
+@media (prefers-reduced-motion: reduce){.hv2-caret,.hv2-copy .hero-title .hero-dot{animation:none;background:transparent;color:inherit;display:inline;height:auto;line-height:inherit;}
 /* reduced-motion: the animated reveal is disabled, so show the real photo statically (the ascii overlay drops away) */
 .hv2-portrait.rm-static .hv2-photo{opacity:1;}
 .hv2-portrait.rm-static .hv2-ascii{opacity:0;}
@@ -55,19 +55,20 @@ function injectStyle() {
 .hv2-copy .hero-name .sep{color:${C.faint};margin:0 .35em;font-weight:400;}
 .hv2-copy .hero-title{font-family:'Geist',system-ui,sans-serif;font-size:clamp(38px,6.4vw,76px);font-weight:600;letter-spacing:-.035em;line-height:.98;color:${C.text};margin:0 0 clamp(16px,2.4vw,22px);}
 .hv2-copy .hero-title .accent{color:${C.accent};}
-.hv2-copy .hero-title .hero-caret{display:inline-block;width:.07em;height:.72em;margin-left:.08em;background:${C.accent};border-radius:1px;vertical-align:-.04em;animation:hv2blink 1.1s steps(1) infinite;}
-.hv2-copy .hero-tagline{font-family:'Geist',system-ui,sans-serif;font-size:clamp(15px,1.7vw,18px);color:${C.text};opacity:.86;max-width:34ch;line-height:1.5;margin:0 0 clamp(26px,3.4vw,36px);}
+.hv2-copy .hero-title .hero-dot{display:inline-block;height:.74em;line-height:.74em;padding:0 .06em;vertical-align:-.08em;background:${C.accent};color:${C.bg};border-radius:2px;animation:hv2dotblink 1.15s steps(1) infinite;}
+@keyframes hv2dotblink{0%,50%{background:${C.accent};color:${C.bg};}50.01%,100%{background:transparent;color:inherit;}}
+.hv2-copy .hero-tagline{font-family:'Geist',system-ui,sans-serif;font-size:clamp(15px,1.7vw,18px);color:${C.text};opacity:.86;max-width:56ch;line-height:1.5;margin:0 0 clamp(26px,3.4vw,36px);}
 .hv2-copy .hero-cta{display:flex;flex-wrap:wrap;gap:10px;}
 .hv2-copy .hero-cta a{font-family:'Geist Mono',ui-monospace,monospace;font-size:12.5px;letter-spacing:.02em;color:${C.muted};text-decoration:none;padding:9px 15px;border:1px solid ${C.border};background:${C.surface2};border-radius:8px;transition:color .18s ease,border-color .18s ease,background .18s ease;}
 .hv2-copy .hero-cta a:hover{color:${C.text};border-color:${C.accent};background:#201a1a;}
 .hv2-copy .hero-cta a:focus-visible{color:${C.text};border-color:${C.accent};background:#201a1a;outline:2px solid ${C.accent};outline-offset:2px;}
-.hv2-portrait{position:relative;width:100%;max-width:380px;aspect-ratio:4/5;margin-inline:auto;border:1px solid ${C.border};border-radius:10px;overflow:hidden;background:#000;box-shadow:0 24px 60px -34px rgba(0,0,0,.9);justify-self:center;cursor:crosshair;touch-action:none;--radius:0px;--rmax:130px;}
+.hv2-portrait{position:relative;width:100%;max-width:380px;aspect-ratio:4/5;margin-inline:auto;border:none;border-radius:0;overflow:hidden;background:${C.surface};justify-self:center;cursor:crosshair;touch-action:none;--radius:0px;--rmax:130px;}
 .hv2-portrait:focus-visible{outline:2px solid ${C.accent};outline-offset:3px;}
 .hv2-layer{position:absolute;inset:0;width:100%;height:100%;}
 .hv2-photo{object-fit:cover;filter:grayscale(1) contrast(1.05) brightness(.92);opacity:0;transition:opacity .4s ease;}
 .hv2-portrait.has-photo .hv2-photo{opacity:1;}
-.hv2-ascii{display:block;margin:0;color:${C.accent};background:${C.bg};font-family:'Geist Mono',ui-monospace,monospace;font-weight:500;white-space:pre;user-select:none;pointer-events:none;overflow:hidden;-webkit-mask-image:radial-gradient(circle var(--radius,0px) at var(--mx,50%) var(--my,50%),transparent 0,transparent 54%,rgba(0,0,0,.6) 78%,#000 100%);mask-image:radial-gradient(circle var(--radius,0px) at var(--mx,50%) var(--my,50%),transparent 0,transparent 54%,rgba(0,0,0,.6) 78%,#000 100%);}
-.hv2-grain{position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.15) 2px 3px);mix-blend-mode:multiply;}
+.hv2-ascii{display:block;margin:0;color:${C.accent};background:${C.surface};font-family:'Geist Mono',ui-monospace,monospace;font-weight:500;white-space:pre;user-select:none;pointer-events:none;overflow:hidden;-webkit-mask-image:radial-gradient(circle var(--radius,0px) at var(--mx,50%) var(--my,50%),transparent 0,transparent 54%,rgba(0,0,0,.6) 78%,#000 100%);mask-image:radial-gradient(circle var(--radius,0px) at var(--mx,50%) var(--my,50%),transparent 0,transparent 54%,rgba(0,0,0,.6) 78%,#000 100%);}
+.hv2-grain{display:none;}
 .hv2-caption{position:absolute;left:13px;bottom:11px;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:${C.faint};pointer-events:none;}
 .hv2-caption b{color:${C.accent};font-weight:500;}
 .hv2-reveal{opacity:0;transform:translateY(4px);}
@@ -125,7 +126,7 @@ export default function init(mount, ctx) {
 
   // copy side: reuse the existing .hero-fallback node (move it in, do not duplicate)
   const copy = document.createElement('div');
-  copy.className = 'hv2-copy hv2-reveal';
+  copy.className = 'hv2-copy';
   const fallback = mount.querySelector('.hero-fallback');
   if (fallback) {
     copy.appendChild(fallback);
@@ -133,8 +134,20 @@ export default function init(mount, ctx) {
     // defensive: build minimal copy if markup missing
     const eb = document.createElement('p');
     eb.className = 'hero-eyebrow';
-    eb.textContent = 'SOFTWARE ENGINEER / BACKEND & DEVELOPER TOOLS';
+    eb.textContent = 'SOFTWARE ENGINEER · SCIENCE-FICTION NERD · STUDENT OF LIFE';
     copy.appendChild(eb);
+  }
+
+  // Capture the copy lines so they can be typed out terminal-style, then clear
+  // them (only when motion is allowed) so they stream in instead of flashing full.
+  const eyebrowEl = copy.querySelector('.hero-eyebrow');
+  const titleEl = copy.querySelector('.hero-title');
+  const taglineEl = copy.querySelector('.hero-tagline');
+  const ctaEl = copy.querySelector('.hero-cta');
+  const typeTargets = [eyebrowEl, titleEl, taglineEl].filter(Boolean).map((el) => ({ el, html: el.innerHTML }));
+  if (!reduced) {
+    typeTargets.forEach((t) => { t.el.textContent = ''; });
+    if (ctaEl) ctaEl.style.opacity = '0';
   }
 
   // portrait side. Focusable + role=img so keyboard/AT users can reach and
@@ -484,12 +497,41 @@ export default function init(mount, ctx) {
     });
   }
 
+  // Type a string of HTML into el one visible character at a time. Tags are
+  // emitted whole (so <span> wrappers stay intact) while their text content types
+  // through, giving a terminal / streamed-output feel.
+  function typeHTML(el, html) {
+    return new Promise((resolve) => {
+      let i = 0; const n = html.length;
+      const step = () => {
+        if (!running || disposed) { el.innerHTML = html; resolve(); return; }
+        if (html[i] === '<') { const c = html.indexOf('>', i); i = (c === -1) ? n : c + 1; }
+        else { i += 1; }
+        el.innerHTML = html.slice(0, i);
+        if (i < n) { typeTimer = setTimeout(step, 4 + Math.random() * 8); }
+        else { el.innerHTML = html; resolve(); }
+      };
+      step();
+    });
+  }
+  function pause(ms) { return new Promise((r) => { typeTimer = setTimeout(r, ms); }); }
+
+  // Stream the copy lines (eyebrow -> title -> tagline) as terminal output after
+  // the command runs, then fade the CTA in. Portrait fades via the is-on class.
   function revealLines() {
     caret.style.display = 'none';
-    if (reduced) { out.classList.add('is-on'); return; }
-    const items = out.querySelectorAll('.hv2-reveal');
-    items.forEach((el, idx) => { el.style.animationDelay = (idx * 90) + 'ms'; });
+    if (reduced) { out.classList.add('is-on'); return Promise.resolve(); }
     requestAnimationFrame(() => out.classList.add('is-on'));
+    let chain = Promise.resolve();
+    typeTargets.forEach((t) => {
+      chain = chain
+        .then(() => (running && !disposed) ? typeHTML(t.el, t.html) : null)
+        .then(() => (running && !disposed) ? pause(150) : null);
+    });
+    chain = chain.then(() => {
+      if (ctaEl && running && !disposed) { ctaEl.style.transition = 'opacity .45s ease'; ctaEl.style.opacity = '1'; }
+    });
+    return chain;
   }
 
   // ---- RAF lifecycle (start/stop) ----
@@ -553,15 +595,13 @@ export default function init(mount, ctx) {
     typeCommand().then(() => {
       if (!running || disposed) return; // boot chain aborted by stop()/dispose
       buildPortrait();
-      revealLines();
       paint();
-      requestAnimationFrame(() => {
-        if (disposed) return;
-        fitAscii();
-        // Kick the one-time discoverability sweep once the lines have begun
-        // revealing, so the photo pulse lands while the visitor is looking.
-        setTimeout(maybeAutoSweep, 520);
-      });
+      requestAnimationFrame(() => { if (!disposed) fitAscii(); });
+      return revealLines();
+    }).then(() => {
+      if (!running || disposed) return;
+      // Kick the one-time discoverability sweep once the lines have streamed in.
+      setTimeout(maybeAutoSweep, 360);
     });
   }
 
