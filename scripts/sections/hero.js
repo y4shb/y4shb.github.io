@@ -55,8 +55,8 @@ function injectStyle() {
 .hv2-copy .hero-name .sep{color:${C.faint};margin:0 .35em;font-weight:400;}
 .hv2-copy .hero-title{font-family:'Geist',system-ui,sans-serif;font-size:clamp(38px,6.4vw,76px);font-weight:600;letter-spacing:-.035em;line-height:.98;color:${C.text};margin:0 0 clamp(16px,2.4vw,22px);}
 .hv2-copy .hero-title .accent{color:${C.accent};}
-.hv2-copy .hero-title .hero-dot{display:inline-block;height:.74em;line-height:.74em;padding:0 .06em;vertical-align:-.08em;background:${C.accent};color:${C.bg};border-radius:2px;animation:hv2dotblink 1.15s steps(1) infinite;}
-@keyframes hv2dotblink{0%,50%{background:${C.accent};color:${C.bg};}50.01%,100%{background:transparent;color:inherit;}}
+.hv2-copy .hero-title .hero-dot{display:inline-block;width:.075em;height:.78em;line-height:.78em;vertical-align:-.02em;background:${C.accent};color:transparent;border-radius:1px;overflow:hidden;animation:hv2dotblink 1.15s steps(1) infinite;}
+@keyframes hv2dotblink{0%,50%{background:${C.accent};}50.01%,100%{background:transparent;}}
 .hv2-copy .hero-tagline{font-family:'Geist',system-ui,sans-serif;font-size:clamp(15px,1.7vw,18px);color:${C.text};opacity:.86;max-width:56ch;line-height:1.5;margin:0 0 clamp(26px,3.4vw,36px);}
 .hv2-copy .hero-cta{display:flex;flex-wrap:wrap;gap:10px;}
 .hv2-copy .hero-cta a{font-family:'Geist Mono',ui-monospace,monospace;font-size:12.5px;letter-spacing:.02em;color:${C.muted};text-decoration:none;padding:9px 15px;border:1px solid ${C.border};background:${C.surface2};border-radius:8px;transition:color .18s ease,border-color .18s ease,background .18s ease;}

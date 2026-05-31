@@ -86,6 +86,24 @@ document.querySelectorAll('[data-tabs]').forEach(group => {
   });
 });
 
+/* ---- about: inline brand wordmarks cloned from the experience tabs ---- */
+document.querySelectorAll('.brand[data-logo]').forEach(slot => {
+  const name = slot.getAttribute('data-logo');
+  const src = document.querySelector(`.exp-tab[data-tab="${name}"] .exp-tab-wordmark`);
+  if (!src) return;
+  const label = slot.textContent.trim();
+  const svg = src.cloneNode(true);
+  svg.removeAttribute('class');
+  svg.classList.add('brand-logo', 'brand-logo--' + name);
+  svg.setAttribute('aria-hidden', 'true');
+  slot.textContent = '';
+  slot.appendChild(svg);
+  const vh = document.createElement('span');
+  vh.className = 'vh';
+  vh.textContent = label;
+  slot.appendChild(vh);
+});
+
 /* ---- lazy visual modules ---- */
 const ctx = { reducedMotion };
 const mounts = document.querySelectorAll('[data-viz]');
