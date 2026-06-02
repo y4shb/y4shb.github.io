@@ -191,13 +191,16 @@ export default function init(mount, ctx) {
     scene.environment = envTex;
   }
 
-  renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); stop(); });
-  renderer.domElement.addEventListener('webglcontextrestored', () => {
+  // Named (not inline) so dispose() can remove them and free the GL context.
+  function onContextLost(e) { e.preventDefault(); stop(); }
+  function onContextRestored() {
     rebuildEnv();
     resize();
     evaluate();
     if (!running) renderOnce();
-  });
+  }
+  renderer.domElement.addEventListener('webglcontextlost', onContextLost, false);
+  renderer.domElement.addEventListener('webglcontextrestored', onContextRestored, false);
 
   // --- animation ---
   const MAX_YAW = THREE.MathUtils.degToRad(30);
@@ -212,6 +215,7 @@ export default function init(mount, ctx) {
   let running = false;     // RAF actually spinning
   let rafId = 0;
   let elapsed = 0;
+  let disposed = false;    // set in dispose(); guards stray one-shot rAFs
 
   function frame(t) {
     chip.position.y = Math.sin(t * BREATHE) * 0.05;
@@ -270,7 +274,7 @@ export default function init(mount, ctx) {
     started = true;
     if (reduced) {
       // Defer so mount has layout (clientWidth/Height non-zero) before sizing.
-      requestAnimationFrame(() => { resize(); renderOnce(); });
+      requestAnimationFrame(() => { if (disposed) return; resize(); renderOnce(); });
       return;
     }
     evaluate();
@@ -283,12 +287,40 @@ export default function init(mount, ctx) {
   }
 
   function dispose() {
+    if (disposed) return; // idempotent: a second call (or stray rAF) is a safe no-op
+    disposed = true;
+    // Full teardown so repeated bfcache cycles cannot exhaust the browser's
+    // WebGL context pool (mirrors proj-dcauto's dispose contract).
     document.removeEventListener('exp:tab', onTab);
+    stop();                       // cancels the RAF and stops the clock
+    ro.disconnect();
+    if (!reduced) {
+      mount.removeEventListener('pointermove', onPointerMove);
+      mount.removeEventListener('pointerleave', onPointerLeave);
+    }
+    renderer.domElement.removeEventListener('webglcontextlost', onContextLost);
+    renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored);
+    // Free every GPU resource: geometries + materials in the scene graph (plus the
+    // instanced pin buffers), then the PMREM env map, its generator, and finally
+    // the renderer and its WebGL context.
+    scene.traverse((obj) => {
+      if (obj.geometry && obj.geometry.dispose) obj.geometry.dispose();
+      const m = obj.material;
+      if (Array.isArray(m)) m.forEach((mm) => mm && mm.dispose && mm.dispose());
+      else if (m && m.dispose) m.dispose();
+      if (obj.isInstancedMesh && obj.dispose) obj.dispose();
+    });
+    if (envTex) envTex.dispose();
+    pmrem.dispose();
+    renderer.dispose();
+    if (renderer.domElement.parentNode) {
+      renderer.domElement.parentNode.removeChild(renderer.domElement);
+    }
   }
 
   // Defer the initial static frame until the mount has real layout, otherwise
   // the first render clamps to a 1x1 aspect and squashes the chip.
-  if (reduced) requestAnimationFrame(() => { resize(); renderOnce(); });
+  if (reduced) requestAnimationFrame(() => { if (disposed) return; resize(); renderOnce(); });
 
   return { start, stop, dispose };
 }

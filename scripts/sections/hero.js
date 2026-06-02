@@ -5,7 +5,8 @@ const PORTRAIT_SRC = 'Yash.jpg';
 const C = {
   bg: '#0a0a0a', surface: '#141414', surface2: '#1c1c1f',
   accent: '#d64545', text: '#ededed', muted: '#8a8f98',
-  faint: '#62666d', border: '#1f1f22',
+  // faint matches --faint in tokens.css; #7c818a clears WCAG AA (5.06:1 on --bg).
+  faint: '#7c818a', border: '#1f1f22',
 };
 
 const COMMAND = '$ cat ~/.face | ascii';
@@ -144,7 +145,13 @@ export default function init(mount, ctx) {
   const titleEl = copy.querySelector('.hero-title');
   const taglineEl = copy.querySelector('.hero-tagline');
   const ctaEl = copy.querySelector('.hero-cta');
-  const typeTargets = [eyebrowEl, titleEl, taglineEl].filter(Boolean).map((el) => ({ el, html: el.innerHTML }));
+  const typeTargets = [eyebrowEl, titleEl, taglineEl].filter(Boolean).map((el) => ({
+    el,
+    html: el.innerHTML,
+    // Keep deep clones of the original children so an aborted reveal can be
+    // restored with replaceChildren (already-parsed nodes, no HTML re-parsing).
+    nodes: [...el.childNodes].map((n) => n.cloneNode(true)),
+  }));
   if (!reduced) {
     typeTargets.forEach((t) => { t.el.textContent = ''; });
     if (ctaEl) ctaEl.style.opacity = '0';
@@ -534,6 +541,26 @@ export default function init(mount, ctx) {
     return chain;
   }
 
+  // Snap copy to its final state. Line ~149 clears the eyebrow/title/tagline so
+  // they can stream in, but the only restore path (revealLines) runs once from a
+  // bootStarted-guarded boot(); if the section is stopped or disposed before/while
+  // typing, untyped lines stay empty and re-entry never re-reveals. Calling this on
+  // every teardown guarantees the headline + CTA can never stay blank for the
+  // session. Idempotent; a no-op under reduced motion (copy was never cleared).
+  function ensureCopyShown() {
+    if (reduced) return;
+    caret.style.display = 'none';
+    out.classList.add('is-on');
+    // The command-prompt flourish is streamed once by typeCommand(); restore it too
+    // so an interrupted boot can't leave the prompt blank or truncated (same bug class).
+    if (cmdText.textContent !== COMMAND) cmdText.textContent = COMMAND;
+    typeTargets.forEach((t) => {
+      if (t.el.innerHTML === t.html) return; // already fully shown
+      t.el.replaceChildren(...t.nodes.map((n) => n.cloneNode(true)));
+    });
+    if (ctaEl) { ctaEl.style.transition = 'none'; ctaEl.style.opacity = '1'; }
+  }
+
   // ---- RAF lifecycle (start/stop) ----
   function beginMotion() {
     if (reduced) {
@@ -640,6 +667,9 @@ export default function init(mount, ctx) {
       // Cancel any pending typing/boot timer so the boot .then() cannot run
       // buildPortrait/revealLines after the section is logically stopped.
       if (typeTimer) { clearTimeout(typeTimer); typeTimer = 0; }
+      // Guarantee the copy is fully shown even if we stopped mid-reveal: boot is
+      // bootStarted-guarded, so a re-entry would otherwise leave the lines blank.
+      ensureCopyShown();
       // Reset to a closed, centered frame so a later re-entry starts as pure ascii.
       target.x = 0.5; target.y = 0.5;
       openness = 0; openTarget = 0;
@@ -653,6 +683,9 @@ export default function init(mount, ctx) {
       running = false;
       endMotion();
       if (typeTimer) { clearTimeout(typeTimer); typeTimer = 0; }
+      // Snap copy to full before teardown so a bfcache restore can't show a blank
+      // headline (the DOM is preserved as-is across pagehide).
+      ensureCopyShown();
       ro.disconnect();
       if (!reduced) {
         portrait.removeEventListener('pointermove', onPointerMove);
