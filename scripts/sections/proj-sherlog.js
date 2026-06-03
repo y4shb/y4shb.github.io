@@ -28,6 +28,10 @@ export default function init(mount, ctx) {
   }
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(w, h, false);
+  // Composite the faint log backdrop first, then the chip on top, in one clear.
+  renderer.autoClear = false;
+  renderer.setClearColor(BG, 1);
+  scene.background = null; // clear() supplies the dark base so logs aren't overpainted
   const canvas = renderer.domElement;
   canvas.style.display = 'block';
   canvas.style.width = '100%';
@@ -38,10 +42,112 @@ export default function init(mount, ctx) {
   root.rotation.x = 0.2;
   scene.add(root);
 
-  // ---- helpers ----
   const drawMats = [];
   const disposables = [];
 
+  // ---- streaming-log backdrop (faint, BEHIND the chip) ----------------------
+  // Offscreen canvas -> CanvasTexture -> fullscreen clip-space quad in its own
+  // ortho scene rendered before the chip. Original, fabricated firmware-CI lines.
+  const LOG_W = 256, LOG_H = 256;
+  const LINE_H = 16;
+  const MAX_LINES = Math.ceil(LOG_H / LINE_H) + 1;
+  const logCanvas = document.createElement('canvas');
+  logCanvas.width = LOG_W;
+  logCanvas.height = LOG_H;
+  const lctx = logCanvas.getContext('2d');
+
+  const logTex = new THREE.CanvasTexture(logCanvas);
+  logTex.minFilter = THREE.LinearFilter;
+  logTex.magFilter = THREE.LinearFilter;
+  logTex.generateMipmaps = false;
+  logTex.colorSpace = THREE.SRGBColorSpace;
+
+  const bgScene = new THREE.Scene();
+  const bgCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const bgGeo = new THREE.PlaneGeometry(2, 2);
+  const logMat = new THREE.MeshBasicMaterial({
+    map: logTex,
+    transparent: true,
+    opacity: 0.5,        // global knock-back; canvas alphas keep it faint already
+    depthTest: false,
+    depthWrite: false,
+    fog: false,
+    toneMapped: false,
+  });
+  bgScene.add(new THREE.Mesh(bgGeo, logMat));
+  disposables.push(bgGeo, logMat, logTex);
+
+  // -- original fabricated log content (MI450 / DCAuto firmware CI) --
+  const NODES = ['mi450-n07', 'dcauto-fw03', 'regress-q2', 'flashbench-11', 'ci-runner-4', 'node-r12'];
+  const ARTS = ['fw_dcauto_3.14.bin', 'mi450_uvm.pkg', 'boot_stage2.img', 'pll_trim.cfg', 'dca-b4821.pkg'];
+  const pick = (a) => a[(Math.random() * a.length) | 0];
+  const rnd = (a, b) => a + ((Math.random() * (b - a + 1)) | 0);
+  const hex = () => (Math.random() * 0xffff | 0).toString(16).padStart(4, '0');
+  const OK = [
+    () => `[PASS] regress/${pick(NODES)} sweep ok (${rnd(12, 98)} cases)`,
+    () => `[INFO] flashing ${pick(ARTS)} -> ${rnd(82, 100)}%`,
+    () => `[ OK ] deploy ${pick(ARTS)} verified crc=0x${hex()}`,
+    () => `[INFO] queue depth ${rnd(0, 7)} | ${pick(NODES)} idle`,
+    () => `[PASS] thermal ${pick(NODES)} ${rnd(41, 67)}C nominal`,
+    () => `[INFO] pll lock ${rnd(2, 9)}us | trim applied`,
+    () => `[ OK ] canary ring-${rnd(0, 2)} stable, promoting`,
+    () => `[INFO] worker w${rnd(1, 12)} claimed t-${rnd(90000, 99999)}`,
+  ];
+  const FAIL = [
+    () => `[FAIL] regress/${pick(NODES)} timeout @ stage ${rnd(2, 6)}`,
+    () => `[FAIL] crc mismatch ${pick(ARTS)} retrying`,
+  ];
+  function nextLogLine() {
+    const fail = Math.random() < 0.08;            // sparing oxide-red accent
+    return { text: (fail ? pick(FAIL) : pick(OK))(), accent: fail };
+  }
+
+  const lines = []; // {text, accent}, most-recent-last
+  function repaintLog() {
+    lctx.clearRect(0, 0, LOG_W, LOG_H);
+    lctx.font = '11px ui-monospace, "SF Mono", Menlo, Consolas, monospace';
+    lctx.textBaseline = 'top';
+    for (let i = 0; i < lines.length; i++) {
+      const y = LOG_H - (lines.length - i) * LINE_H; // newest at bottom
+      const fade = 0.35 + 0.65 * (i / Math.max(1, lines.length - 1)); // oldest dimmer
+      lctx.fillStyle = lines[i].accent
+        ? `rgba(214,69,69,${0.85 * fade})`           // #d64545, rare
+        : `rgba(170,176,170,${0.78 * fade})`;        // dim CI grey-green
+      lctx.fillText(lines[i].text, 8, y);
+    }
+    // dissolve right edge so line tails don't form a hard block behind the chip
+    lctx.globalCompositeOperation = 'destination-out';
+    const grad = lctx.createLinearGradient(LOG_W * 0.55, 0, LOG_W, 0);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.6)');
+    lctx.fillStyle = grad;
+    lctx.fillRect(0, 0, LOG_W, LOG_H);
+    lctx.globalCompositeOperation = 'source-over';
+    logTex.needsUpdate = true;                      // ONLY here, on change
+  }
+
+  let logTimer = null;
+  function pushLine() {
+    lines.push(nextLogLine());
+    if (lines.length > MAX_LINES) lines.shift();
+    repaintLog();
+    if (!running) renderAll();                      // keep it visible if RAF idle
+    logTimer = setTimeout(pushLine, 120 + Math.random() * 140); // 120-260ms band
+  }
+  function startLog() {
+    if (logTimer === null) pushLine();
+  }
+  function stopLog() {
+    if (logTimer !== null) { clearTimeout(logTimer); logTimer = null; }
+  }
+
+  function renderAll() {
+    renderer.clear();                  // dark base (#0a0a0a) + depth
+    renderer.render(bgScene, bgCam);   // faint logs, drawn first
+    renderer.render(scene, camera);    // chip on top, always in front
+  }
+
+  // ---- helpers ----
   function lineMat(opacity) {
     const m = new THREE.LineBasicMaterial({ color: ACCENT, transparent: true, opacity });
     disposables.push(m);
@@ -189,14 +295,14 @@ export default function init(mount, ctx) {
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     renderer.setSize(w, h, false);
-    if (!running) renderer.render(scene, camera);
+    if (!running) renderAll();
   }
   const ro = new ResizeObserver(resize);
   ro.observe(mount);
 
   // ---- WebGL context loss guards ----
   const onLost = (e) => { e.preventDefault(); stopRaf(); };
-  const onRestored = () => { if (running) startRaf(); else renderer.render(scene, camera); };
+  const onRestored = () => { logTex.needsUpdate = true; if (running) startRaf(); else renderAll(); };
   canvas.addEventListener('webglcontextlost', onLost, false);
   canvas.addEventListener('webglcontextrestored', onRestored, false);
 
@@ -207,16 +313,42 @@ export default function init(mount, ctx) {
   let running = false;
   let rafId = null;
 
+  // ---- drag-orbit state (layered over the idle spin) ----
+  const PITCH_LIMIT = 0.5;       // clamp vertical drag to about +/-0.5 rad
+  let dragYaw = 0;               // accumulated yaw offset (unbounded)
+  let dragPitch = 0;             // accumulated pitch offset (clamped)
+  let dragging = false;
+  let activePointer = null;
+  let lastX = 0, lastY = 0;
+  let velYaw = 0, velPitch = 0;  // release inertia velocities (rad/frame)
+
+  function applyOrbit() {
+    root.rotation.y = elapsed * 0.075 + dragYaw;
+    root.rotation.x = 0.2 + dragPitch;
+  }
+
   function frame() {
     rafId = requestAnimationFrame(frame);
     const dt = clock.getDelta();
-    elapsed += dt;
+    // advance idle time only while the section is the active spinner; when the
+    // loop is kept alive purely for a drag/inertia settle, freeze the idle base
+    if (running) elapsed += dt;
     if (!drewIn) {
       applyDraw(elapsed);
       if (elapsed > 3.4) drewIn = true; // last stage end (2.1 + 1.1) + slack
     }
-    root.rotation.y = elapsed * 0.075;
-    renderer.render(scene, camera);
+    // release inertia: ease out, then let the RAF settle if idle-paused
+    if (!dragging && (velYaw !== 0 || velPitch !== 0)) {
+      dragYaw += velYaw;
+      dragPitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, dragPitch + velPitch));
+      velYaw *= 0.92;
+      velPitch *= 0.92;
+      if (Math.abs(velYaw) < 1e-4) velYaw = 0;
+      if (Math.abs(velPitch) < 1e-4) velPitch = 0;
+      if (velYaw === 0 && velPitch === 0 && !running) { stopRaf(); }
+    }
+    applyOrbit();
+    renderAll();
   }
 
   function startRaf() {
@@ -228,12 +360,63 @@ export default function init(mount, ctx) {
     if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
   }
 
+  // ---- click-drag orbit (skipped entirely under reduced motion) ----
+  function onPointerDown(e) {
+    if (activePointer !== null) return;
+    activePointer = e.pointerId;
+    dragging = true;
+    velYaw = 0; velPitch = 0;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    canvas.style.cursor = 'grabbing';
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    startRaf(); // ensure a live loop while dragging even if idle-paused
+    e.preventDefault();
+  }
+  function onPointerMove(e) {
+    if (!dragging || e.pointerId !== activePointer) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    const yawStep = dx * 0.0085;
+    const pitchStep = dy * 0.0085;
+    dragYaw += yawStep;
+    dragPitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, dragPitch + pitchStep));
+    velYaw = yawStep;   // seed inertia from the latest motion
+    velPitch = pitchStep;
+    if (!running && rafId === null) startRaf();
+    e.preventDefault();
+  }
+  function endDrag(e) {
+    if (e.pointerId !== activePointer) return;
+    dragging = false;
+    activePointer = null;
+    canvas.style.cursor = 'grab';
+    try { if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    // inertia continues in frame(); if no velocity and idle-paused, settle now
+    if (!running && velYaw === 0 && velPitch === 0) stopRaf();
+  }
+  function onPointerCancel(e) { endDrag(e); }
+
+  if (!reduced) {
+    canvas.style.cursor = 'grab';
+    canvas.style.touchAction = 'none';
+    canvas.addEventListener('pointerdown', onPointerDown, false);
+    canvas.addEventListener('pointermove', onPointerMove, false);
+    canvas.addEventListener('pointerup', endDrag, false);
+    canvas.addEventListener('pointercancel', onPointerCancel, false);
+  }
+
   if (reduced) {
+    // static log frame: fill the buffer once, paint once, NO timer/listener.
+    for (let i = 0; i < MAX_LINES; i++) lines.push(nextLogLine());
+    repaintLog();
     applyDraw(1e9);
     root.rotation.y = 0.35;
-    renderer.render(scene, camera);
+    renderAll();
     // Re-measure after layout so an offscreen/0-width card renders at correct aspect.
-    requestAnimationFrame(() => { resize(); renderer.render(scene, camera); });
+    requestAnimationFrame(() => { resize(); renderAll(); });
   }
 
   let disposed = false;
@@ -243,20 +426,37 @@ export default function init(mount, ctx) {
       if (reduced || running) return;
       resize(); // force a real-size pass before the first start frame
       running = true;
+      startLog();
       startRaf();
     },
     stop() {
       if (!running) return;
       running = false;
+      stopLog();
       stopRaf();
     },
     dispose() {
       if (disposed) return;
       disposed = true;
       this.stop();
+      // release pointer capture if a drag is still active, then settle the loop
+      if (activePointer !== null) {
+        try { if (canvas.hasPointerCapture(activePointer)) canvas.releasePointerCapture(activePointer); } catch (_) {}
+        activePointer = null;
+        dragging = false;
+      }
+      velYaw = 0; velPitch = 0;
+      stopLog();
+      stopRaf();
       ro.disconnect();
       canvas.removeEventListener('webglcontextlost', onLost, false);
       canvas.removeEventListener('webglcontextrestored', onRestored, false);
+      if (!reduced) {
+        canvas.removeEventListener('pointerdown', onPointerDown, false);
+        canvas.removeEventListener('pointermove', onPointerMove, false);
+        canvas.removeEventListener('pointerup', endDrag, false);
+        canvas.removeEventListener('pointercancel', onPointerCancel, false);
+      }
       disposables.forEach((d) => d.dispose && d.dispose());
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
       renderer.dispose();

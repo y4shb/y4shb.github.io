@@ -736,11 +736,19 @@ export default function init(mount, ctx) {
     for (const L of layers) L.node.position.y = L.baseY + L.explodeY * f;
   }
 
+  // Drag-to-rotate accumulators layered on top of the auto loop. Yaw is
+  // effectively unbounded; pitch is clamped. velYaw/velPitch carry inertia.
+  const PITCH_LIMIT = 0.5;
+  let dragYaw = 0, dragPitch = 0;
+  let velYaw = 0, velPitch = 0;
+  let dragging = false, draggingId = null, lastX = 0, lastY = 0;
+
   function renderFrame(sep, spin) {
     applyLayers(sep);
 
-    group.rotation.y = spin;
-    group.rotation.x = -0.32 + sep * 0.05;
+    // Auto spin/pitch with the user's drag accumulators layered on top.
+    group.rotation.y = spin + dragYaw;
+    group.rotation.x = -0.32 + sep * 0.05 + dragPitch;
 
     // Pull the camera back as the package separates so it stays framed.
     const camR = 17 + sep * 4.0;
@@ -778,6 +786,63 @@ export default function init(mount, ctx) {
   }
 
   // -------------------------------------------------------------------------
+  // Click-and-drag rotation (pointer events -> mouse + touch). Drag adds yaw
+  // and clamped pitch on top of the auto loop; release leaves inertia behind.
+  // -------------------------------------------------------------------------
+  const DRAG_SENS = 0.008; // radians per pixel
+  const canvasEl = renderer.domElement;
+
+  const onPointerDown = e => {
+    if (dragging) return;
+    dragging = true;
+    draggingId = e.pointerId;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    velYaw = 0; velPitch = 0;
+    canvasEl.style.cursor = 'grabbing';
+    try { canvasEl.setPointerCapture(e.pointerId); } catch (_) {}
+    if (active) ensureRunning();
+    e.preventDefault();
+  };
+
+  const onPointerMove = e => {
+    if (!dragging || e.pointerId !== draggingId) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    const dYaw = dx * DRAG_SENS;
+    const dPitch = dy * DRAG_SENS;
+    dragYaw += dYaw;
+    dragPitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, dragPitch + dPitch));
+    // remember the last motion so release can hand off to inertia
+    velYaw = dYaw;
+    velPitch = dPitch;
+    if (active) ensureRunning();
+    e.preventDefault();
+  };
+
+  const endDrag = e => {
+    if (!dragging || (e && e.pointerId !== draggingId)) return;
+    dragging = false;
+    const id = draggingId;
+    draggingId = null;
+    canvasEl.style.cursor = 'grab';
+    if (id !== null) { try { canvasEl.releasePointerCapture(id); } catch (_) {} }
+    // inertia continues to be applied by the tick loop until it decays
+    if (active) ensureRunning();
+  };
+
+  if (!reduced) {
+    canvasEl.style.cursor = 'grab';
+    canvasEl.style.touchAction = 'none';
+    canvasEl.addEventListener('pointerdown', onPointerDown);
+    canvasEl.addEventListener('pointermove', onPointerMove);
+    canvasEl.addEventListener('pointerup', endDrag);
+    canvasEl.addEventListener('pointercancel', endDrag);
+  }
+
+  // -------------------------------------------------------------------------
   // Context-loss guard (GPU reset invalidates the PMREM env map)
   // -------------------------------------------------------------------------
   const onLost = e => { e.preventDefault(); running = false; };
@@ -810,6 +875,18 @@ export default function init(mount, ctx) {
     const sep = Math.min(1, auto * 0.92 + hover * 0.12);
     // spin slowly, accelerating slightly on hover
     const spin = phase * 0.55 * (1 + hover * 0.6);
+    // Drag inertia: while not dragging, ease the residual velocity out and
+    // let it decay so the RAF settles back to the plain auto loop.
+    if (!dragging) {
+      if (velYaw !== 0 || velPitch !== 0) {
+        dragYaw += velYaw;
+        dragPitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, dragPitch + velPitch));
+        velYaw *= 0.92;
+        velPitch *= 0.92;
+        if (Math.abs(velYaw) < 1e-4) velYaw = 0;
+        if (Math.abs(velPitch) < 1e-4) velPitch = 0;
+      }
+    }
     renderFrame(sep, spin);
     raf = requestAnimationFrame(tick);
   }
@@ -846,6 +923,16 @@ export default function init(mount, ctx) {
       ro.disconnect();
       card.removeEventListener('pointerenter', onEnter);
       card.removeEventListener('pointerleave', onLeave);
+      // release pointer capture if teardown lands mid-drag, then remove drag listeners
+      if (dragging && draggingId !== null) {
+        try { canvasEl.releasePointerCapture(draggingId); } catch (_) {}
+      }
+      dragging = false;
+      draggingId = null;
+      canvasEl.removeEventListener('pointerdown', onPointerDown);
+      canvasEl.removeEventListener('pointermove', onPointerMove);
+      canvasEl.removeEventListener('pointerup', endDrag);
+      canvasEl.removeEventListener('pointercancel', endDrag);
       renderer.domElement.removeEventListener('webglcontextlost', onLost);
       renderer.domElement.removeEventListener('webglcontextrestored', onRestored);
       disposables.forEach(d => d && d.dispose && d.dispose());

@@ -156,6 +156,7 @@ export default function init(mount, ctx) {
   // --- interaction (pointer parallax scoped to mount) ---
   const ptr = new THREE.Vector2(0, 0);
   const ptrTarget = new THREE.Vector2(0, 0);
+  const ZERO2 = new THREE.Vector2(0, 0);
 
   function onPointerMove(e) {
     const r = mount.getBoundingClientRect();
@@ -168,6 +169,67 @@ export default function init(mount, ctx) {
   if (!reduced) {
     mount.addEventListener('pointermove', onPointerMove, { passive: true });
     mount.addEventListener('pointerleave', onPointerLeave);
+  }
+
+  // --- click-drag orbit (layered over the cursor parallax) ---
+  // Horizontal drag accumulates yaw (unbounded); vertical drag tilts pitch,
+  // clamped to ~+/-0.5 rad. While dragging we suppress the cursor parallax so
+  // the drag fully owns the view; on release we add eased-out inertia that the
+  // RAF lets settle to zero. All rotation is applied to the `chip` group.
+  const DRAG_PITCH_CLAMP = 0.5;     // rad
+  const DRAG_YAW_SENS = 0.006;      // rad per px
+  const DRAG_PITCH_SENS = 0.006;    // rad per px
+  let dragYaw = 0;                  // accumulated yaw applied to chip
+  let dragPitch = 0;                // clamped pitch applied to chip
+  let dragging = false;
+  let dragPointerId = -1;
+  let lastDragX = 0, lastDragY = 0;
+  let velYaw = 0, velPitch = 0;     // release inertia (rad per frame-ish)
+  const canvas = renderer.domElement;
+
+  function onDragDown(e) {
+    if (dragging) return;
+    dragging = true;
+    dragPointerId = e.pointerId;
+    lastDragX = e.clientX;
+    lastDragY = e.clientY;
+    velYaw = 0;
+    velPitch = 0;
+    canvas.style.cursor = 'grabbing';
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    // A drag during a paused (non-running) state should still update the frame.
+    if (!running) renderOnce();
+  }
+  function onDragMove(e) {
+    if (!dragging || e.pointerId !== dragPointerId) return;
+    const dx = e.clientX - lastDragX;
+    const dy = e.clientY - lastDragY;
+    lastDragX = e.clientX;
+    lastDragY = e.clientY;
+    dragYaw += dx * DRAG_YAW_SENS;
+    dragPitch = THREE.MathUtils.clamp(dragPitch + dy * DRAG_PITCH_SENS, -DRAG_PITCH_CLAMP, DRAG_PITCH_CLAMP);
+    velYaw = dx * DRAG_YAW_SENS;
+    velPitch = dy * DRAG_PITCH_SENS;
+    if (!running) renderOnce();
+  }
+  function endDrag(e) {
+    if (!dragging || (e && e.pointerId !== dragPointerId)) return;
+    dragging = false;
+    canvas.style.cursor = 'grab';
+    try { if (canvas.hasPointerCapture(dragPointerId)) canvas.releasePointerCapture(dragPointerId); } catch (_) {}
+    dragPointerId = -1;
+    // If paused, nudge a one-shot frame so any residual inertia is reflected;
+    // the running RAF handles inertia naturally when active.
+    if (!running) renderOnce();
+  }
+
+  if (!reduced) {
+    canvas.style.cursor = 'grab';
+    canvas.style.touchAction = 'none';
+    canvas.addEventListener('pointerdown', onDragDown);
+    canvas.addEventListener('pointermove', onDragMove);
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
   }
 
   function resize() {
@@ -219,11 +281,28 @@ export default function init(mount, ctx) {
 
   function frame(t) {
     chip.position.y = Math.sin(t * BREATHE) * 0.05;
+
+    // Release inertia: when not actively dragging, decay the residual velocity
+    // and fold it into the accumulated rotation, easing out to a settle.
+    if (!dragging && (velYaw !== 0 || velPitch !== 0)) {
+      dragYaw += velYaw;
+      dragPitch = THREE.MathUtils.clamp(dragPitch + velPitch, -DRAG_PITCH_CLAMP, DRAG_PITCH_CLAMP);
+      velYaw *= 0.92;
+      velPitch *= 0.92;
+      if (Math.abs(velYaw) < 1e-4) velYaw = 0;
+      if (Math.abs(velPitch) < 1e-4) velPitch = 0;
+    }
+    // Drag orbit on the chip group, layered over the idle z-wobble.
+    chip.rotation.y = dragYaw;
+    chip.rotation.x = dragPitch;
     chip.rotation.z = Math.sin(t * 0.4) * 0.012;
 
     if (reduced) {
       ptr.set(0.4, -0.35);
       ptrTarget.copy(ptr);
+    } else if (dragging) {
+      // Drag fully owns the view: ease the parallax back to neutral.
+      ptr.lerp(ZERO2, 0.12);
     } else {
       ptr.lerp(ptrTarget, 0.055);
     }
@@ -297,6 +376,15 @@ export default function init(mount, ctx) {
     if (!reduced) {
       mount.removeEventListener('pointermove', onPointerMove);
       mount.removeEventListener('pointerleave', onPointerLeave);
+      // Release any in-progress drag capture before tearing the canvas down.
+      if (dragging && dragPointerId !== -1) {
+        try { if (canvas.hasPointerCapture(dragPointerId)) canvas.releasePointerCapture(dragPointerId); } catch (_) {}
+      }
+      dragging = false;
+      canvas.removeEventListener('pointerdown', onDragDown);
+      canvas.removeEventListener('pointermove', onDragMove);
+      canvas.removeEventListener('pointerup', endDrag);
+      canvas.removeEventListener('pointercancel', endDrag);
     }
     renderer.domElement.removeEventListener('webglcontextlost', onContextLost);
     renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored);
