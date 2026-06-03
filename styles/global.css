@@ -34,8 +34,10 @@ img, canvas { display: block; max-width: 100%; }
   height: var(--nav-h);
   display: flex; align-items: center; justify-content: space-between;
   padding: 0 clamp(16px, 5vw, 48px);
-  transition: background-color 250ms ease, backdrop-filter 250ms ease, border-color 250ms ease;
+  transition: background-color 200ms ease, border-color 200ms ease;
   border-bottom: 1px solid transparent;
+  transform: translateZ(0);
+  contain: layout;
 }
 .nav.scrolled {
   background: rgba(10, 10, 10, 0.72);
@@ -51,7 +53,7 @@ img, canvas { display: block; max-width: 100%; }
 .nav-links { display: flex; gap: clamp(12px, 2.5vw, 28px); align-items: center; }
 .nav-links a {
   font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.04em;
-  color: var(--muted); transition: color 180ms var(--ease-out); position: relative;
+  color: var(--muted); transition: color 120ms linear; position: relative;
 }
 .nav-links a:hover, .nav-links a.active { color: var(--text); }
 .nav-status {

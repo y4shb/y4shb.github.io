@@ -34,18 +34,42 @@ if (nav && navToggle) {
 }
 
 const navLinks = [...document.querySelectorAll('.nav-links a[href^="#"]')];
-const linkFor = id => navLinks.find(a => a.getAttribute('href') === '#' + id);
-const navObserver = new IntersectionObserver(entries => {
-  entries.forEach(e => {
-    if (!e.isIntersecting) return;
-    navLinks.forEach(a => a.classList.remove('active'));
-    linkFor(e.target.id)?.classList.add('active');
-  });
-}, { rootMargin: '-45% 0px -50% 0px' });
-['about', 'experience', 'projects'].forEach(id => {
-  const el = document.getElementById(id);
-  if (el) navObserver.observe(el);
-});
+const navSections = ['hero', 'about', 'experience', 'projects', 'contact']
+  .map(id => document.getElementById(id)).filter(Boolean);
+
+// Pick the section whose vertical midpoint is closest to viewport center.
+// Deterministic (immune to IO callback ordering), immune to dead-zone gaps,
+// and only mutates the DOM when the winner actually changes -- which kills
+// the wipe-then-set color strobe that produced the visible flicker.
+let currentActive = null;
+const setActive = id => {
+  if (id === currentActive) return;
+  currentActive = id;
+  for (const a of navLinks) {
+    const on = a.getAttribute('href') === '#' + id;
+    if (a.classList.contains('active') !== on) a.classList.toggle('active', on);
+  }
+};
+const pickActive = () => {
+  const mid = innerHeight / 2;
+  let best = null, bestDist = Infinity;
+  for (const s of navSections) {
+    const r = s.getBoundingClientRect();
+    if (r.bottom < 0 || r.top > innerHeight) continue;
+    const d = Math.abs((r.top + r.bottom) / 2 - mid);
+    if (d < bestDist) { bestDist = d; best = s.id; }
+  }
+  if (best) setActive(best);
+};
+let navPending = false;
+const scheduleNav = () => {
+  if (navPending) return;
+  navPending = true;
+  requestAnimationFrame(() => { navPending = false; pickActive(); });
+};
+addEventListener('scroll', scheduleNav, { passive: true });
+addEventListener('resize', scheduleNav, { passive: true });
+scheduleNav();
 
 /* ---- scroll reveal ---- */
 const revealObserver = new IntersectionObserver(entries => {
