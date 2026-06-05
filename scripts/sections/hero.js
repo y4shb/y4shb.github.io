@@ -67,8 +67,12 @@ function injectStyle() {
 .hv2-portrait:focus-visible{outline:2px solid ${C.accent};outline-offset:3px;}
 .hv2-layer{position:absolute;inset:0;width:100%;height:100%;}
 .hv2-photo{object-fit:cover;filter:grayscale(1) contrast(1.05) brightness(.92);opacity:0;transition:opacity .4s ease;}
-.hv2-portrait.has-photo .hv2-photo{opacity:1;}
-.hv2-ascii{display:block;margin:0;color:${C.accent};background:${C.surface};font-family:'Geist Mono',ui-monospace,monospace;font-weight:500;white-space:pre;user-select:none;pointer-events:none;overflow:hidden;-webkit-mask-image:radial-gradient(circle var(--radius,0px) at var(--mx,50%) var(--my,50%),transparent 0,transparent 54%,rgba(0,0,0,.6) 78%,#000 100%);mask-image:radial-gradient(circle var(--radius,0px) at var(--mx,50%) var(--my,50%),transparent 0,transparent 54%,rgba(0,0,0,.6) 78%,#000 100%);}
+.hv2-ascii{display:block;margin:0;color:${C.accent};background:${C.surface};font-family:'Geist Mono',ui-monospace,monospace;font-weight:500;white-space:pre;user-select:none;pointer-events:none;overflow:hidden;opacity:1;transition:opacity .3s ease;-webkit-mask-image:radial-gradient(circle var(--radius,0px) at var(--mx,50%) var(--my,50%),transparent 0,transparent 54%,rgba(0,0,0,.6) 78%,#000 100%);mask-image:radial-gradient(circle var(--radius,0px) at var(--mx,50%) var(--my,50%),transparent 0,transparent 54%,rgba(0,0,0,.6) 78%,#000 100%);}
+@media (hover: hover){.hv2-portrait.has-photo:hover .hv2-photo{opacity:1;}}
+.hv2-portrait.has-photo.is-revealed .hv2-photo{opacity:1;}
+.hv2-portrait.has-photo.is-revealed .hv2-ascii{opacity:0;}
+.hv2-portrait.rm-static .hv2-photo{opacity:1;}
+.hv2-portrait.rm-static .hv2-ascii{opacity:0;}
 .hv2-grain{display:none;}
 .hv2-caption{position:absolute;left:13px;bottom:11px;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:${C.faint};pointer-events:none;}
 .hv2-caption b{color:${C.accent};font-weight:500;}
@@ -470,6 +474,9 @@ export default function init(mount, ctx) {
     else { target.x = 0.5; target.y = 0.46; }
     openTarget = held ? 1 : 0;
     portrait.classList.toggle('active', held);
+    // is-revealed drives the CSS opacity swap (photo/ascii) on touch devices,
+    // where the radial-gradient mask can't be relied on to occlude the photo.
+    portrait.classList.toggle('is-revealed', held);
     portrait.setAttribute('aria-pressed', held ? 'true' : 'false');
   }
 
@@ -666,6 +673,7 @@ export default function init(mount, ctx) {
       held = false; sweeping = false;
       applyRadius();
       portrait.classList.remove('active');
+      portrait.classList.remove('is-revealed');
       portrait.setAttribute('aria-pressed', 'false');
     },
     dispose() {
