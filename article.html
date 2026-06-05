@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Article - Yash Bhardwaj</title>
+<meta name="description" content="An essay by Yash Bhardwaj.">
+<meta name="author" content="Yash Bhardwaj">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Yash Bhardwaj">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/global.css">
+<link rel="stylesheet" href="styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous">
+</head>
+<body class="reader-body">
+
+<div class="progress" id="progress"></div>
+
+<header class="nav scrolled" id="nav">
+  <a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a>
+  <nav class="nav-links" aria-label="Primary">
+    <a href="/#projects">portfolio &#x2197;</a>
+  </nav>
+</header>
+
+<main id="top">
+  <article class="blog blog-wrap" id="article">
+    <div class="blog-meta" id="meta">
+      <div class="meta-top">
+        <span class="meta-pill meta-pill--essay">essay</span>
+        <div class="meta-tags" id="meta-tags" aria-label="Tags"></div>
+      </div>
+      <div class="meta-bottom">
+        <span class="meta-read" id="reading-time">- min read</span>
+        <span class="meta-dot" aria-hidden="true">&middot;</span>
+        <span class="meta-date" id="meta-date">-</span>
+      </div>
+    </div>
+    <div id="content"><div class="loading">loading...</div></div>
+  </article>
+  <footer class="blog-foot">
+    <a href="/#projects">&#x2190; back to portfolio</a>
+    <a href="#top">top &#x2191;</a>
+  </footer>
+</main>
+
+<script defer src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous"></script>
+<script type="module">
+  import { renderContent } from './scripts/content.js';
+  const params = new URLSearchParams(location.search);
+  const slug = params.get('slug') || '';
+  // Lazy mermaid: only load if the rendered markdown actually has a mermaid fence.
+  // renderContent runs first; if mermaid is needed it dynamic-imports it here.
+  const lazyMermaid = {
+    async run(opts) {
+      const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+      mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a', noteBkgColor:'#141414', noteTextColor:'#8a8f98', noteBorderColor:'#2a2a30', actorBkg:'#141414', actorBorder:'#2a2a30', actorTextColor:'#ededed', signalColor:'#8a8f98', signalTextColor:'#ededed' }});
+      return mermaid.run(opts);
+    }
+  };
+  function start(){ renderContent({ kind: 'articles', slug, mermaid: lazyMermaid }); }
+  if (window.marked && window.hljs) start();
+  else window.addEventListener('load', start, { once: true });
+</script>
+</body>
+</html>

@@ -65,8 +65,7 @@ a.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; b
 .exp-tab[aria-selected="true"] { color: var(--accent); border-left-color: var(--accent); }
 .exp-panel { display: none; position: relative; }
 .exp-panel.is-active { display: block; }
-.exp-panel[data-panel="amd"].is-active { display: block; }
-.exp-panel-body { max-width: 64ch; }
+.exp-panel-body { max-width: min(64ch, 100%); }
 .exp-role { font-size: clamp(20px, 2.4vw, 24px); line-height: 1.25; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 6px; }
 .exp-at { color: var(--accent); font-weight: 500; }
 .exp-role-logo { width: auto; vertical-align: -0.08em; margin-left: 0.1em; }
@@ -90,9 +89,6 @@ a.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; b
 .exp-resume a { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
 .exp-resume a:hover { text-decoration: underline; }
 
-/* ============ DIVIDER ============ */
-.divider { position: relative; height: 160px; margin: clamp(24px, 5vw, 64px) 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); overflow: hidden; background: var(--bg); }
-
 /* ============ PROJECTS ============ */
 #projects { padding-top: var(--s8); }
 .proj-tier1 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 56px; }
@@ -103,27 +99,6 @@ a.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; b
 }
 .proj-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
 .proj-card-viz { aspect-ratio: 16/10; height: auto; background: #0d0d0f; border-bottom: 1px solid var(--border); position: relative; overflow: hidden; }
-.proj-card-viz--mono {
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
-  /* whisper-quiet engineering dot-grid over the base plate */
-  background:
-    radial-gradient(circle at center, rgba(138,143,152,0.12) 1px, transparent 1.4px) 0 0 / 22px 22px,
-    #0d0d0f;
-}
-.proj-mono-wordmark {
-  width: 56%; max-width: 220px; height: auto; display: block;
-  color: var(--muted); opacity: 0.55;
-  transition: opacity 200ms var(--ease-out);
-}
-.proj-mono-rule {
-  width: 36px; height: 2px; background: var(--accent); opacity: 0.6; border-radius: 1px;
-  transition: width 200ms var(--ease-out), opacity 200ms var(--ease-out);
-}
-.proj-card:hover .proj-mono-wordmark { opacity: 0.78; }
-.proj-card:hover .proj-mono-rule { width: 48px; opacity: 0.85; }
-@media (prefers-reduced-motion: reduce) {
-  .proj-mono-wordmark, .proj-mono-rule { transition: none; }
-}
 .proj-card-body { padding: 20px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
 .proj-kicker { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
 .proj-title { font-size: clamp(20px, 2.4vw, 24px); line-height: 1.25; font-weight: 600; letter-spacing: -0.01em; }
@@ -166,8 +141,11 @@ a.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; b
   .proj-tier2 { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 768px) {
-  .exp { grid-template-columns: 1fr; }
-  .exp-panel[data-panel="amd"].is-active { grid-template-columns: 1fr; }
+  /* minmax(0,1fr) lets the track shrink past min-content; without this the 1fr
+     resolves to minmax(auto,1fr) where auto = min-content of children
+     (~640px panel-body), bursting the 320px viewport. */
+  .exp { grid-template-columns: minmax(0, 1fr); }
+  .exp-panels, .exp-panel, .exp-panel-body { min-width: 0; max-width: 100%; }
   .exp-tablist { flex-direction: row; overflow-x: auto; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
   .exp-tab { border-left: none; border-bottom: 2px solid transparent; min-height: 44px; }
   .exp-tab[aria-selected="true"] { border-left: none; border-bottom-color: var(--accent); }
@@ -179,4 +157,51 @@ a.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; b
 }
 @media (max-width: 480px) {
   .proj-tier2 { grid-template-columns: 1fr; }
+}
+
+/* ----- CLS guards (invisible until/unless hydration is slow) ----- */
+.hero-mount{min-height:min(82vh,720px);contain:layout paint;}
+@media (max-width:768px){.hero-mount{min-height:min(78vh,560px);}}
+.hero-mount[data-hydrated]{min-height:0;contain:none;}
+.exp-viz{aspect-ratio:16/9;min-height:280px;}
+#projects-list{min-height:520px;contain:layout paint;}
+#articles-list{min-height:480px;}
+#content{min-height:60vh;}
+#content[data-prebaked="1"]{min-height:0;}
+
+/* Reader meta placeholders: keep glyph metrics stable while values stream in. */
+.meta-date,.meta-read,.meta-stats,.meta-kicker{min-width:5ch;display:inline-block;}
+
+/* ---------- mobile responsive polish ---------- */
+/* Experience tabs: enforce 44px tap target and add row-gap on wrapped strip.
+   Selectors live in this file (.exp-tablist, .exp-tab) per survey. */
+.exp-tablist { row-gap: 8px; }
+.exp-tab {
+  min-height: 44px;
+  padding-block: 12px;
+  display: inline-flex;
+  align-items: center;
+}
+
+@media (max-width: 480px) {
+  /* Hero ASCII font floor: glyphs were computing to 3.91-5.56px; force >=7px.
+     .hero-mount owns the ASCII container per survey. */
+  .hero-mount { font-size: max(7px, 1em); }
+  .hero-mount pre,
+  .hero-mount code { font-size: max(7px, 1em); }
+
+  /* Hero vertical rhythm: pull CTAs ~10px closer to fold on iPhone viewports.
+     Existing padding-top is var(--nav-h); shave 10px off top and add a tighter
+     bottom so the section breathes less below the fold. */
+  .section--hero {
+    padding-top: calc(var(--nav-h) - 10px);
+    padding-bottom: max(0px, calc(var(--s6, 24px) - 10px));
+  }
+
+  /* Hero eyebrow: allow wrap so the tracking-heavy strip does not truncate at 320px. */
+  .hero-eyebrow {
+    white-space: normal;
+    line-height: 1.4;
+    letter-spacing: 0.16em;
+  }
 }

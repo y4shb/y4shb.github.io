@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why your healthcheck endpoint lies - Yash Bhardwaj</title>
+<meta name="description" content="A 200 OK is cheap. So is lying.">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/03-why-your-healthcheck-endpoint-lies.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Why your healthcheck endpoint lies - Yash Bhardwaj">
+<meta property="og:description" content="A 200 OK is cheap. So is lying.">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/03-why-your-healthcheck-endpoint-lies.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Why your healthcheck endpoint lies - Yash Bhardwaj">
+<meta name="twitter:description" content="A 200 OK is cheap. So is lying.">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Why your healthcheck endpoint lies","datePublished":"2025-11-19","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/03-why-your-healthcheck-endpoint-lies.html"},"url":"https://y4shbhardwaj.com/article/03-why-your-healthcheck-endpoint-lies.html","description":"A 200 OK is cheap. So is lying.","keywords":"observability, healthchecks"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">observability</span><span class="chip">healthchecks</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Nov 19, 2025</span></div></div><div id="content" data-prebaked="1"><h1>Why your healthcheck endpoint lies</h1>
+<p><em>a 200 OK is cheap. So is lying</em></p>
+<p>Every <code>/healthz</code> endpoint I have inherited returned 200. Most were lying.</p>
+<p>The lie was rarely malicious; it was usually <code>return Response(status=200)</code> wired up on day one and never touched again. The service it claimed to represent had since grown a Postgres dependency, a Redis cache, a downstream billing API, and a feature flag service. The healthcheck still returned 200 if the process was breathing. The most expensive version of this I ever watched in the wild: a load balancer kept a dead pod in rotation for six months because the pod&#39;s TCP listener was up and <code>/healthz</code> was hardcoded to 200. The fleet sat behind a consistent-hash load balancer keyed on user ID, so the same unlucky ~2.5% of users hit the dead pod on every retry and got a uniform failure rate, which is exactly what made it invisible (no spike, no alert, just a flat drag on conversion). Nobody noticed until a finance reconciliation flagged the gap.</p>
+<p>This post is about why that happens, and how to build healthchecks that mean something without melting the dependencies they&#39;re supposed to be checking.</p>
+<h2>The shallow check problem</h2>
+<p>The default healthcheck most frameworks ship with looks roughly like this:</p>
+<pre><code class="hljs language-python">@app.route(&quot;/healthz&quot;)
+def healthz():
+    return {&quot;status&quot;: &quot;ok&quot;}, 200</code></pre>
+<p>This is a process liveness check, dressed up as a service health check. It answers exactly one question: is the HTTP server accepting connections and able to allocate a response? That&#39;s it. It tells you nothing about whether the service can do its actual job.</p>
+<p>The reason this is dangerous is that it sits at the wrong level. A modern web service is a chain. It accepts a request, talks to a database, maybe hits a cache, calls one or two downstream APIs, possibly writes to a queue, and returns. The user only cares about the chain. The shallow check only verifies the front door.</p>
+<p>So you end up in the worst kind of outage: every probe is green, every log line says &quot;healthcheck ok&quot;, and the actual service is silently dropping 80% of real traffic because the database connection pool is exhausted. Monitoring stays green because monitoring is looking at the same lying endpoint.</p>
+<h2>The naive overcorrection</h2>
+<p>Once a team gets burned by a shallow check, the next mistake is usually the opposite. They write a &quot;deep&quot; check that touches everything:</p>
+<pre><code class="hljs language-python">@app.route(&quot;/healthz&quot;)
+def healthz():
+    db.execute(&quot;SELECT 1&quot;)
+    cache.ping()
+    requests.get(&quot;https://billing.example.com/healthz&quot;, timeout=2)
+    requests.get(&quot;https://flags.example.com/healthz&quot;, timeout=2)
+    return {&quot;status&quot;: &quot;ok&quot;}, 200</code></pre>
+<p>This feels rigorous. It is a footgun.</p>
+<p>Three things go wrong, often at the same time.</p>
+<p>First, the load balancer probes this endpoint every two seconds across, say, fifty pods. That&#39;s twenty-five queries per second to your database, your cache, and every downstream API, generated entirely by healthchecks. If the downstream API has a rate limit, you&#39;ve just spent it on heartbeats. If the database has a connection limit, your healthcheck is now competing with real traffic for slots.</p>
+<p>Second, this check is transitively coupled. If the billing API has a hiccup, every service that healthchecks against it goes unhealthy. The load balancer pulls every pod out of rotation. The service is now completely down, because of an outage in a downstream system that maybe only 10% of requests actually use. The blast radius of any failure is now the entire dependency graph.</p>
+<p>Third, when one of these checks fails intermittently (and they always do, eventually), you&#39;ll get flapping. Pods leaving and rejoining the pool every thirty seconds. Connection pools resetting. Cache warmups happening over and over. Latency spikes. Cascading retries.</p>
+<p>The naive deep check makes your system less reliable than the shallow one, because now your healthcheck is a load amplifier and a failure amplifier at the same time.</p>
+<h2>Liveness vs readiness vs startup</h2>
+<p>The fix starts with admitting that &quot;healthcheck&quot; is not one question. It&#39;s at least three, and they have different answers and different consumers.</p>
+<pre><code>                  ┌─────────────────────────────┐
+                  │      orchestrator           │
+                  │  (k8s, ECS, nomad, etc.)    │
+                  └──────┬──────────┬───────────┘
+                         │          │
+              liveness   │          │   readiness
+              &quot;restart   │          │   &quot;send me
+               me?&quot;      │          │    traffic?&quot;
+                         ▼          ▼
+                  ┌─────────────────────────────┐
+                  │         service             │
+                  └─────────────────────────────┘
+                         ▲
+              startup    │
+              &quot;am I done │
+               warming?&quot; │
+                         │
+                  ┌──────┴──────────────────────┐
+                  │  same orchestrator, gated   │
+                  │  before the other two       │
+                  └─────────────────────────────┘</code></pre>
+<p><strong>Liveness</strong> answers: is this process so broken that the only fix is to kill it? Deadlocked event loop, OOM-survivor that&#39;s leaking memory, stuck in an infinite GC pause. The action on failure is to restart the container. Liveness should be the shallowest check you have. If liveness checks dependencies, you create a feedback loop where a downstream blip restarts your entire fleet. That is exactly the wrong response.</p>
+<p><strong>Readiness</strong> answers: should the load balancer send this instance traffic right now? This is where dependency-awareness lives, with caveats. A failing readiness check pulls the pod out of rotation but does not restart it. Critically, when readiness fails across all pods, the load balancer&#39;s behavior matters a lot. Some return 503 immediately, some hold connections, some fall back to a stale set. Know what yours does before you trust readiness with critical dependencies.</p>
+<p><strong>Startup</strong> answers: has the slow boot finished? Large models loading into memory, JIT warmup, cache pre-population, schema migrations. Without a startup probe, your liveness check fires during boot, the orchestrator thinks the pod is dead, and you get a crashloop on every deploy. Concrete version: a 14B-parameter model takes 90 seconds to load from disk; the default liveness probe starts checking almost immediately and gives up after a few failures around the 30-second mark; every deploy crashloops until someone adds a startup probe. Kubernetes added the startup probe as alpha in v1.16, beta in v1.18, GA in v1.20 for exactly this reason, and it explicitly disables liveness and readiness until it succeeds (<a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/">https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/</a>). Startup probes give the process a grace period with relaxed criteria, then hand off to liveness once the process is up.</p>
+<p>These three are not interchangeable. Most outages I&#39;ve seen from &quot;bad healthchecks&quot; are actually cases where one endpoint was being used for all three jobs.</p>
+<h2>What each check should actually do</h2>
+<p>Concretely, for a typical web service with a database, cache, and two downstream APIs, here&#39;s the shape I reach for:</p>
+<pre><code class="hljs language-python">@app.route(&quot;/livez&quot;)
+def livez():
+    # Process-internal only. No I/O.
+    # If this returns non-200, the orchestrator restarts the pod.
+    return {&quot;status&quot;: &quot;ok&quot;}, 200
+
+
+@app.route(&quot;/startupz&quot;)
+def startupz():
+    # Did the slow boot finish? Migrations applied, caches warmed,
+    # config loaded. Set once at boot, then this is fast.
+    if not boot_state.ready:
+        return {&quot;status&quot;: &quot;starting&quot;, &quot;reason&quot;: boot_state.reason}, 503
+    return {&quot;status&quot;: &quot;ok&quot;}, 200
+
+
+@app.route(&quot;/readyz&quot;)
+def readyz():
+    # Should I receive traffic? Check things this pod actually needs
+    # to serve a request. Use cached results, don&#39;t hammer dependencies.
+    checks = dependency_cache.snapshot()
+    failures = [name for name, ok in checks.items() if not ok and is_critical(name)]
+    if failures:
+        return {&quot;status&quot;: &quot;degraded&quot;, &quot;failed&quot;: failures}, 503
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;checks&quot;: checks}, 200</code></pre>
+<p>The interesting work happens off the request path. Each dependency gets its own long-running poller task, on its own cadence, writing the result into <code>dependency_cache</code>. The readiness handler just reads the cache. The load balancer&#39;s probe rate and the actual dependency check rate are two completely separate numbers.</p>
+<pre><code class="hljs language-python">async def poll_forever(name, check, interval, timeout):
+    while True:
+        try:
+            await asyncio.wait_for(check(), timeout=timeout)
+            dependency_cache.set(name, ok=True)
+        except Exception as e:
+            dependency_cache.set(name, ok=False, error=repr(e))
+        await asyncio.sleep(interval)
+
+
+async def start_pollers():
+    # Each poller runs independently. No gather, no shared cadence.
+    asyncio.create_task(poll_forever(&quot;db&quot;,      check_db,      interval=5,  timeout=2))
+    asyncio.create_task(poll_forever(&quot;cache&quot;,   check_cache,   interval=5,  timeout=1))
+    asyncio.create_task(poll_forever(&quot;billing&quot;, check_billing, interval=30, timeout=3))
+    asyncio.create_task(poll_forever(&quot;flags&quot;,   check_flags,   interval=30, timeout=3))</code></pre>
+<p>Now your readiness endpoint can be called a thousand times a second and your database still only sees one <code>SELECT 1</code> every five seconds. The HTTP probe frequency at the load balancer is decoupled from the actual dependency check frequency behind the handler. The cost of a deep check no longer scales with traffic, or with the orchestrator&#39;s probe interval.</p>
+<p>The two cadences look like this:</p>
+<pre><code>  probe cadence (fast)                  poller cadence (slow, per-dep)
+
+  LB ──▶ /readyz ──▶ dependency_cache         background poller ──▶ db
+         (every 2s)   (in-memory read,        (every 5s)              │
+                       &lt;1ms, no I/O)                                  ▼
+                            ▲                                  dependency_cache
+                            │                                   (atomic write)
+                            └──────── shared map ──────────────────────┘
+
+  LB never touches db, cache, or downstream APIs directly.
+  Probe rate and dependency-check rate are independent knobs.</code></pre>
+<h2>Critical vs non-critical dependencies</h2>
+<p>The next question is which dependencies count. The naive deep check treats every dependency as load-bearing, which is why one downstream burp takes the whole service offline. In reality, dependencies fall into tiers:</p>
+<ul>
+<li><strong>Hard dependencies.</strong> The service is useless without them. For a checkout service, that&#39;s usually the primary database and the payment API. If these are down, readiness should fail.</li>
+<li><strong>Soft dependencies.</strong> Used by some requests, but the service can serve a meaningful subset of traffic without them. The recommendation engine, the analytics sink, the search index. If these are down, the service should stay in rotation and return degraded responses for the affected endpoints.</li>
+<li><strong>Best-effort dependencies.</strong> Telemetry, logging, feature flag refresh. The service might lose visibility but should never go unhealthy because of them.</li>
+</ul>
+<p>Encoding this is mostly discipline. A <code>dependency</code> decorator that tags each check with a tier, and a readiness handler that only fails on <code>Tier.HARD</code>:</p>
+<pre><code class="hljs language-python">@dependency(name=&quot;db&quot;, tier=Tier.HARD, interval=5)
+async def check_db():
+    async with db.acquire() as conn:
+        await conn.execute(&quot;SELECT 1&quot;)
+
+@dependency(name=&quot;recommendations&quot;, tier=Tier.SOFT, interval=15)
+async def check_recommendations():
+    async with httpx.AsyncClient(timeout=2) as c:
+        r = await c.get(f&quot;{REC_HOST}/healthz&quot;)
+        r.raise_for_status()</code></pre>
+<p>The readiness handler returns degraded-but-up when soft checks fail, and routes the affected endpoints to a fallback. The load balancer keeps sending traffic. Users hitting the fallback see &quot;recommendations unavailable&quot; instead of a 503. The blast radius of a recommendation outage is now the recommendation feature, not the entire site.</p>
+<h2>Fail-closed vs fail-open</h2>
+<p>There is a class of dependency where you genuinely cannot serve traffic without it. Auth is the canonical example, with one important caveat: this only applies when you have to call the auth service to validate each request. Most modern setups verify JWTs (RFC 7519) locally against a cached JWKS (RFC 7517), which means a short auth-provider blip doesn&#39;t actually break authentication, only token issuance and refresh.</p>
+<p>In that world fail-open for a bounded window is reasonable and most production systems do exactly that. The fail-closed argument bites hardest when you have no local validation path: the auth provider is unreachable, you cannot prove the caller is who they say they are, and letting requests through would turn an availability incident into a security incident. There, fail-closed is correct: readiness fails, traffic stops, customers see an outage, and nobody gets unauthenticated access.</p>
+<p>For most other dependencies, fail-open with a degraded mode is better. Cache down? Serve from origin, slower. Recommendation engine down? Show the popular-items fallback. Search index stale? Return a banner saying &quot;results may be out of date.&quot;</p>
+<p>The rule of thumb I use: fail-closed when the failure mode of fail-open is worse than the outage. Fail-open with a clear degraded path everywhere else. And write down which mode each dependency uses, because the next person on call will not be able to figure it out from the code.</p>
+<h2>The probe-cost problem</h2>
+<p>Even with cached dependency checks, the probes themselves cost something. Kubernetes probe defaults are <code>periodSeconds=10</code>, <code>timeoutSeconds=1</code>, <code>failureThreshold=3</code>, <code>successThreshold=1</code>, <code>initialDelaySeconds=0</code> (<a href="https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/">https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/</a>), which sounds harmless until you multiply across a real fleet with aggressive intervals. The minimum supported <code>periodSeconds</code> is 1; sub-second probes are not allowed.</p>
+<p>At small scale this is a rounding error. But the moment someone tightens the probe interval to chase faster failover (2-second probes show up in latency-sensitive setups), the math changes fast. The probe-traffic load on each pod is <code>(probes_per_pod * checks_per_probe) / periodSeconds</code>, and the fleet total scales linearly with pod count:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th align="right">Fleet size</th>
+<th align="right">periodSeconds</th>
+<th align="right">Probes per pod</th>
+<th align="right">Fleet probe rate</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="right">50</td>
+<td align="right">10</td>
+<td align="right">liveness + readiness</td>
+<td align="right">10 rps</td>
+<td>rounding error</td>
+</tr>
+<tr>
+<td align="right">500</td>
+<td align="right">10</td>
+<td align="right">liveness + readiness</td>
+<td align="right">100 rps</td>
+<td>still fine</td>
+</tr>
+<tr>
+<td align="right">500</td>
+<td align="right">2</td>
+<td align="right">liveness + readiness</td>
+<td align="right">500 rps</td>
+<td>logs start to drown</td>
+</tr>
+<tr>
+<td align="right">2000</td>
+<td align="right">2</td>
+<td align="right">liveness + readiness</td>
+<td align="right">2000 rps</td>
+<td>before a single user shows up</td>
+</tr>
+<tr>
+<td align="right">2000</td>
+<td align="right">2</td>
+<td align="right">startup only (during boot window)</td>
+<td align="right">1000 rps</td>
+<td>Kubernetes disables L/R until startup succeeds</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>A fleet of 2000 pods with both a liveness and a readiness probe at 2-second intervals is 2000 requests per second of pure healthcheck traffic, before a single user shows up. That is noise in your access logs, noise in your latency histograms, noise in your distributed traces, and a non-trivial chunk of every pod&#39;s CPU spent answering probes. If your readiness handler does any real work (even a cache read with JSON serialization), it adds up.</p>
+<p>Two small fixes help a lot:</p>
+<ol>
+<li><strong>Don&#39;t log healthcheck requests.</strong> Most logging middleware will happily emit a structured log line for every <code>/livez</code> hit. Skip them at the middleware level. Your logs will be 30% smaller and you&#39;ll actually be able to find real requests.</li>
+<li><strong>Don&#39;t trace healthcheck requests.</strong> Same reason. They&#39;re not interesting, they sample your trace budget away from real traffic, and they make every dashboard noisier.</li>
+</ol>
+<pre><code class="hljs language-python">@app.middleware(&quot;http&quot;)
+async def skip_healthcheck_logging(request, call_next):
+    if request.url.path in (&quot;/livez&quot;, &quot;/readyz&quot;, &quot;/startupz&quot;):
+        request.state.skip_logging = True
+        request.state.skip_tracing = True
+    return await call_next(request)</code></pre>
+<p>Tiny change, surprisingly large quality-of-life improvement.</p>
+<h2>The failure modes healthchecks specifically get wrong</h2>
+<p>Healthcheck handlers have their own peculiar failure modes that generic &quot;test the failure path&quot; advice doesn&#39;t cover. Two in particular show up everywhere:</p>
+<p><strong>The slow-and-sad case.</strong> The dependency isn&#39;t down, it&#39;s just taking 30 seconds to answer. A naive check with no timeout, or a timeout longer than the probe interval, will pile probes on top of each other. Coroutines stack up, connection pools drain, the process OOMs, and now the healthcheck itself is the outage. Verify that every check has a timeout strictly shorter than the poller interval, and that hitting the timeout actually flips the cached state to unhealthy rather than leaving the previous value stuck.</p>
+<p><strong>The flapping case.</strong> A dependency goes up and down every thirty seconds. Without hysteresis, readiness toggles in lockstep: pod out of rotation, pod back in, pod out, pod back in. Connection pools reset on every flap, cache warmups thrash, downstream services get a burst of reconnects each time the pod rejoins. Add a small &quot;must be healthy for N consecutive polls before flipping back to ready&quot; rule, even just two or three samples. It costs you a few seconds of extra downtime on recovery and saves you from the worst kind of self-inflicted DDoS.</p>
+<pre><code class="hljs language-python">class Hysteresis:
+    def __init__(self, healthy_threshold=3, unhealthy_threshold=1):
+        self.healthy_threshold = healthy_threshold
+        self.unhealthy_threshold = unhealthy_threshold
+        self.consecutive_healthy = 0
+        self.consecutive_unhealthy = 0
+        self.state = &quot;unhealthy&quot;  # start closed; require N healthy samples to enter rotation
+
+    def observe(self, ok: bool) -&gt; str:
+        if ok:
+            self.consecutive_healthy += 1
+            self.consecutive_unhealthy = 0
+            if self.state == &quot;unhealthy&quot; and self.consecutive_healthy &gt;= self.healthy_threshold:
+                self.state = &quot;healthy&quot;
+        else:
+            self.consecutive_unhealthy += 1
+            self.consecutive_healthy = 0
+            if self.state == &quot;healthy&quot; and self.consecutive_unhealthy &gt;= self.unhealthy_threshold:
+                self.state = &quot;unhealthy&quot;
+        return self.state</code></pre>
+<p>Note the asymmetry: fail fast (one bad sample flips you out), recover slow (three good samples to flip back). That matches what you actually want, which is to take a misbehaving pod out quickly and only let it rejoin when you have evidence it stayed fixed.</p>
+<p>A third one worth a sentence: orchestrators sometimes probe <code>/readyz</code> and <code>/livez</code> from different network paths (sidecar vs node-local), and a check that works from one path can fail from the other. Probe from both before you trust the result.</p>
+<p>These failure modes only surface when you break things deliberately. Verify your healthcheck under fault injection, or the dashboard will read green during the next outage.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

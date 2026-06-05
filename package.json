@@ -1,0 +1,11 @@
+{
+  "name": "y4shb-portfolio",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prebake": "node scripts/prebake.mjs"
+  },
+  "devDependencies": {
+    "marked": "^12.0.0"
+  }
+}

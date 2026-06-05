@@ -14,7 +14,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 // (metal IHS over an organic substrate) ringed by HBM memory stacks, mounting
 // standoffs/screws, and a nickel/aluminium cold plate, with a transparent coolant
 // loop carrying a glowing oxide-red flow (TRON-like). Original representation of the
-// generic OAM hardware class — no logos, wordmarks, or proprietary trade dress.
+// generic OAM hardware class - no logos, wordmarks, or proprietary trade dress.
 // Cursor orbits/tilts the module and speeds the coolant; scroll rotates it on touch.
 // Self-contained init(mount,ctx) -> {start,stop,dispose}; on-demand RAF,
 // reduced-motion static frame, context-loss guard.
@@ -23,11 +23,11 @@ const OXIDE = '#d64545';
 const lerp = (a, b, t) => a + (b - a) * t;
 
 // Merged cinematic grade (one full-screen pass, linear space, BEFORE OutputPass so ACES
-// stays the single tone-map/colorspace step — no double tone-mapping). Folds four product-shot
+// stays the single tone-map/colorspace step - no double tone-mapping). Folds four product-shot
 // effects into one pass to avoid per-pass render-target bandwidth:
 //   - chromatic aberration: scales with radius^2 so the centre stays razor-sharp and only the
 //     corners fringe, exactly how a real lens behaves (cheap glitch look avoided).
-//   - subtle radial defocus: a faint screen-space blur that ramps in at the edges only — fakes a
+//   - subtle radial defocus: a faint screen-space blur that ramps in at the edges only - fakes a
 //     shallow product-shot focal plane (crisp centre, soft corners) at ~0 cost vs a real BokehPass
 //     depth prepass, which the small-card budget can't spare.
 //   - vignette: soft round corner darkening, floored so corners never crush to black.
@@ -95,7 +95,7 @@ export default function init(mount, ctx) {
 
   const pmrem = new THREE.PMREMGenerator(renderer);
   // crisper IBL: low blur (0.02) keeps tight specular streaks on the brushed metal + glass tube,
-  // which a dark scene leans on for shape — IBL is baked once, so sharper costs nothing per frame.
+  // which a dark scene leans on for shape - IBL is baked once, so sharper costs nothing per frame.
   let envTex = pmrem.fromScene(new RoomEnvironment(), 0.02).texture;
   scene.environment = envTex;
 
@@ -149,7 +149,7 @@ export default function init(mount, ctx) {
       x.fillStyle = 'rgba(150,110,55,0.30)'; x.beginPath(); x.arc(vx, vy, r, 0, 7); x.fill();
       x.fillStyle = 'rgba(6,10,8,0.9)'; x.beginPath(); x.arc(vx, vy, r * 0.45, 0, 7); x.fill();
     }
-    // silkscreen refs — generic invented part designators + a fake lot code (NO branding)
+    // silkscreen refs: generic invented part designators + a fake lot code (NO branding)
     x.fillStyle = 'rgba(190,200,196,0.5)'; x.font = '13px monospace';
     const refs = ['U1', 'L4', 'C12', 'Q3', 'R20', 'VRM', 'PH', 'TP1', 'J7', 'HBM0', 'HBM3'];
     for (let i = 0; i < 30; i++) x.fillText(refs[(rng() * refs.length) | 0], rng() * size, rng() * size);
@@ -178,7 +178,7 @@ export default function init(mount, ctx) {
     const t = new THREE.CanvasTexture(c);
     t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(4, 4);
     t.anisotropy = MAX_ANISO; t.needsUpdate = true;
-    // leave colorSpace default (LinearSRGB) — this is a data map
+    // leave colorSpace default (LinearSRGB): this is a data map
     return track(t);
   }
   // faint longitudinal normal grain for the glass tube wall (refraction ripple)
@@ -221,7 +221,7 @@ export default function init(mount, ctx) {
     clearcoat: 0.5, clearcoatRoughness: 0.25, envMapIntensity: 0.9,
     sheen: 0.25, sheenRoughness: 0.6, sheenColor: new THREE.Color(0x16302a), // soft solder-mask grazing glow
   });
-  // cold-plate base: satin electroless-nickel read (matte, not chrome) — also the fitting collars
+  // cold-plate base: satin electroless-nickel read (matte, not chrome), also the fitting collars
   const aluDark = new THREE.MeshPhysicalMaterial({
     color: 0x7a7f86, metalness: 1.0, roughness: 0.58,
     roughnessMap: brushTex, anisotropy: 0, anisotropyRotation: 0,
@@ -246,7 +246,7 @@ export default function init(mount, ctx) {
   const subMat = new THREE.MeshPhysicalMaterial({ color: 0x10231c, metalness: 0.2, roughness: 0.58, clearcoat: 0.25, clearcoatRoughness: 0.35, envMapIntensity: 0.7 });
   // sparing gold/copper: capacitor/contact accents around the package (used very sparingly)
   const goldAccent = new THREE.MeshPhysicalMaterial({ color: 0xc89a52, metalness: 1.0, roughness: 0.5, anisotropy: 0, envMapIntensity: 0.45 });
-  // tiny status LED (the one other place oxide-red is allowed) — emissive, blooms faintly
+  // tiny status LED (the one other place oxide-red is allowed): emissive, blooms faintly
   const ledMat = new THREE.MeshStandardMaterial({ color: 0x2a0c0c, emissive: new THREE.Color(OXIDE), emissiveIntensity: 2.2, roughness: 0.4, metalness: 0 });
   [pcbMat, aluDark, screwMat, mosMat, sockMat, backMat, barbMat,
    hbmMat, ihsMat, subMat, goldAccent, ledMat].forEach(track);
@@ -459,7 +459,7 @@ export default function init(mount, ctx) {
     composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(w, h, { samples: 4 }));
     composer.addPass(new RenderPass(scene, camera));
     // GTAO darkens the gaps between the HBM ring and the package, the crevices under the cold plate,
-    // and where standoffs/components meet the substrate — the #1 cue that sells a machined assembly
+    // and where standoffs/components meet the substrate: the #1 cue that sells a machined assembly
     // (PBR metal looks plasticky with no occlusion in the gaps the env map floods). Skip on
     // touch/low-power (noHover) to protect that budget. Goes BEFORE bloom so occluded areas don't bloom.
     if (!noHover) {
@@ -467,7 +467,7 @@ export default function init(mount, ctx) {
       gtao.output = GTAOPass.OUTPUT.Default;   // beauty * denoised AO (ship this; .AO/.Denoise are debug views)
       gtao.blendIntensity = 0.85;
       gtao.updateGtaoMaterial({
-        radius: 0.45,           // world units — square module ~5 wide; reaches the HBM/package gaps + component bases
+        radius: 0.45,           // world units, square module ~5 wide; reaches the HBM/package gaps + component bases
         distanceExponent: 1.0,
         thickness: 0.5,         // chunkier parts than the old thin fins: a touch more thickness reads cleaner
         distanceFallOff: 0.6,
@@ -489,7 +489,7 @@ export default function init(mount, ctx) {
     if (reduced) grade.uniforms.uGrain.value = 0;   // no animated grain on the reduced-motion static frame
     composer.addPass(grade);
     // SMAA: the composer bypasses the renderer's MSAA, so fin/finger/bracket edges alias on the
-    // offscreen target once GTAO/bloom run — SMAA restores clean edges cheaply (one pass).
+    // offscreen target once GTAO/bloom run; SMAA restores clean edges cheaply (one pass).
     smaa = new SMAAPass(w, h);
     composer.addPass(smaa);
     output = new OutputPass();            // ACES tone-map + sRGB, always last (single tone-map step)
@@ -524,14 +524,14 @@ export default function init(mount, ctx) {
       dragYaw += dx * 0.01;
       dragPitch = Math.max(-0.5, Math.min(0.5, dragPitch + dy * 0.006));
       vel = dx * 0.01;
-      flowTarget = 1.9; bloomTarget = 1; lastInput = performance.now();
+      flowTarget = 1.9; bloomTarget = 1;
       ensure();
       return;
     }
     const r = mount.getBoundingClientRect();
     tx = ((e.clientX - r.left) / r.width) * 2 - 1;
     ty = ((e.clientY - r.top) / r.height) * 2 - 1;
-    flowTarget = 1.9; bloomTarget = 1; lastInput = performance.now();
+    flowTarget = 1.9; bloomTarget = 1;
     ensure();
   }
   function onLeave() { if (!dragging) { tx = 0; ty = 0; flowTarget = 0.6; bloomTarget = 0; ensure(); } }
@@ -546,7 +546,7 @@ export default function init(mount, ctx) {
     dragging = false;
     renderer.domElement.style.cursor = 'grab';
     try { mount.releasePointerCapture(e.pointerId); } catch (_) {}
-    lastInput = performance.now(); ensure();
+    ensure();
   }
   let scrollRaf = 0;
   function onScroll() {
@@ -557,7 +557,6 @@ export default function init(mount, ctx) {
       const prog = 1 - (r.top + r.height / 2) / (window.innerHeight + r.height);
       scrollSpin = (prog - 0.5) * 2.2;
       if (noHover) { flowTarget = 1.4; bloomTarget = 0.7; }
-      lastInput = performance.now();
       ensure();
     });
   }
@@ -576,7 +575,7 @@ export default function init(mount, ctx) {
     composer.render();
   }
 
-  let raf = 0, running = false, active = false, last = 0, lastInput = 0, disposed = false;
+  let raf = 0, running = false, active = false, last = 0, disposed = false;
   function tick(now) {
     if (!running || disposed) return;
     const dt = Math.min(0.05, (now - last) / 1000); last = now;
@@ -597,6 +596,8 @@ export default function init(mount, ctx) {
   const onLost = e => { e.preventDefault(); running = false; if (raf) cancelAnimationFrame(raf); raf = 0; };
   const onRestored = () => {
     const old = envTex; envTex = pmrem.fromScene(new RoomEnvironment(), 0.02).texture; scene.environment = envTex; if (old) old.dispose();
+    if (composer) { composer.renderTarget1?.dispose(); composer.renderTarget2?.dispose(); }
+    gtao?.dispose?.(); bloom?.dispose?.(); grade?.dispose?.(); smaa?.dispose?.(); output?.dispose?.();
     composer = null; gtao = null; grade = null; smaa = null; output = null; size();
     if (reduced) frame(); else if (active) ensure();
   };

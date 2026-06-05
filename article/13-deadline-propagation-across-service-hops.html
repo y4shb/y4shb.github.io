@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deadline propagation across service hops without losing context - Yash Bhardwaj</title>
+<meta name="description" content="A 500ms budget is not 500ms at hop six unless every hop knows what it already spent">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/13-deadline-propagation-across-service-hops.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Deadline propagation across service hops without losing context - Yash Bhardwaj">
+<meta property="og:description" content="A 500ms budget is not 500ms at hop six unless every hop knows what it already spent">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/13-deadline-propagation-across-service-hops.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Deadline propagation across service hops without losing context - Yash Bhardwaj">
+<meta name="twitter:description" content="A 500ms budget is not 500ms at hop six unless every hop knows what it already spent">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Deadline propagation across service hops without losing context","datePublished":"2026-03-02","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/13-deadline-propagation-across-service-hops.html"},"url":"https://y4shbhardwaj.com/article/13-deadline-propagation-across-service-hops.html","description":"A 500ms budget is not 500ms at hop six unless every hop knows what it already spent","keywords":"microservices, latency, deadlines"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">microservices</span><span class="chip">latency</span><span class="chip">deadlines</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Mar 2, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Deadline propagation across service hops without losing context</h1>
+<p><em>a 500ms budget is not 500ms at hop six unless every hop knows what it already spent</em></p>
+<p>The checkout team paged me on a Tuesday with a complaint that sounded familiar. P99 was fine. P99.9 was a horror movie. Some requests took 12 seconds and returned data the user had long since stopped caring about. The frontend had given up at 800ms. The backend kept computing. Six services deep, a recommendation engine was still scoring carts for a user who had closed the tab and gone to lunch.</p>
+<p>The fix was not bigger machines or faster code. The fix was telling every service how long it had left to live, and getting every service to believe it.</p>
+<h2>The shape of the problem</h2>
+<p>Here is a representative call graph for the failure mode.</p>
+<pre><code>        client (500ms)
+           |
+           v
+    edge-gateway
+           |
+           v
+    checkout-orchestrator
+       /      |       \
+      v       v        v
+   cart-svc  pricing  inventory
+                |          \
+                v           v
+            tax-calc    warehouse-router
+                            |
+                            v
+                       reco-scorer</code></pre>
+<p>Five hops from the edge to the deepest leaf. The user&#39;s browser sent a request with an 800ms client timeout. The edge gateway had its own 5 second default. The orchestrator had a 30 second default copied from a stack overflow answer in 2019. By the time you reached <code>reco-scorer</code>, nobody had any idea what the original budget was. Every service was happily working on requests that had already failed upstream.</p>
+<p>This is the canonical deadline propagation problem. Each service knows its own timeout. None of them know the <em>remaining</em> budget.</p>
+<h2>What a deadline actually is</h2>
+<p>A timeout is a duration. A deadline is a wall-clock instant. The distinction matters.</p>
+<p>If service A sets a 500ms timeout and then spends 200ms doing work before calling service B with a 500ms timeout, service B now has up to 700ms of total budget from the user&#39;s perspective. The user&#39;s browser gave up at 800ms. Service B is computing into the void.</p>
+<p>A deadline is absolute. &quot;Finish before T+0.500s, where T is the moment the user pressed the button.&quot; When A calls B, A does not pass a timeout. A passes a deadline. B looks at the deadline, subtracts the current time, and that is its actual budget. If the result is negative or absurdly small, B should refuse to start the work.</p>
+<p>gRPC has had this baked in since the early days. It encodes the deadline as the <code>grpc-timeout</code> header, in a wire-friendly format like <code>100m</code> (100 milliseconds) or <code>2S</code> (2 seconds). The deadline travels with the call. When the gRPC server receives it, the server-side context has the deadline pre-installed. You do not even have to think about it for Go and Java services. You just have to not turn it off.</p>
+<p>HTTP has no standard. There is no IETF blessed deadline header. You invent your own. Most shops settle on something like <code>X-Request-Deadline</code> carrying either an epoch milliseconds value or a remaining-millis integer. Either works. Epoch is simpler conceptually but requires NTP discipline across the fleet, because every hop&#39;s view of &quot;now&quot; is what gets subtracted from the deadline. Remaining-ms is more forgiving of clock skew because each hop only needs to measure elapsed time locally, at the cost of a small bias accumulated per hop and the need to remember the subtraction before forwarding.</p>
+<h2>Threading the deadline through code</h2>
+<p>The shape of the code, in Go, with a homegrown HTTP header for the non-gRPC parts:</p>
+<pre><code class="hljs language-go">const DeadlineHeader = &quot;X-Request-Deadline-Ms&quot;
+
+// Server side: extract deadline from incoming request and install
+// it on the request context. Refuse fast if there is not enough
+// budget left to be worth starting.
+func DeadlineMiddleware(minBudget time.Duration) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            deadlineMs := r.Header.Get(DeadlineHeader)
+            if deadlineMs == &quot;&quot; {
+                // No deadline propagated. Use a sane default,
+                // but log it loudly. This is almost always a bug.
+                ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+                defer cancel()
+                deadlineFallbackCounter.Inc()
+                next.ServeHTTP(w, r.WithContext(ctx))
+                return
+            }
+
+            ms, err := strconv.ParseInt(deadlineMs, 10, 64)
+            if err != nil {
+                http.Error(w, &quot;bad deadline header&quot;, 400)
+                return
+            }
+            deadline := time.UnixMilli(ms)
+            remaining := time.Until(deadline)
+
+            if remaining &lt; minBudget {
+                // Deadline-too-short fast fail. Do not even start.
+                // We return 503 with Retry-After: 0 to tell the caller
+                // it may retry immediately, ideally on a different replica.
+                // See RFC 9110 Section 15.6.4 for 503 semantics and
+                // Section 10.2.3 for Retry-After.
+                // must set headers before http.Error writes the status
+                w.Header().Set(&quot;Retry-After&quot;, &quot;0&quot;)
+                http.Error(w, &quot;deadline exceeded before start&quot;, 503)
+                deadlineTooShortCounter.Inc()
+                return
+            }
+
+            ctx, cancel := context.WithDeadline(r.Context(), deadline)
+            defer cancel()
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+}
+
+// Client side: forward the deadline to the next hop. Subtract a
+// small slush to account for network and our own teardown time.
+func ForwardDeadline(ctx context.Context, req *http.Request, slush time.Duration) error {
+    deadline, ok := ctx.Deadline()
+    if !ok {
+        return errors.New(&quot;no deadline on outgoing request&quot;)
+    }
+    forwardDeadline := deadline.Add(-slush)
+    if time.Until(forwardDeadline) &lt;= 0 {
+        return errors.New(&quot;no budget left to forward&quot;)
+    }
+    req.Header.Set(DeadlineHeader, strconv.FormatInt(forwardDeadline.UnixMilli(), 10))
+    return nil
+}</code></pre>
+<p>A few things worth pulling out.</p>
+<p>The <code>minBudget</code> argument to the middleware is the deadline-too-short check. If a service knows it has never returned a useful response in under 30ms, accepting work with 12ms left is pure waste. You spend CPU, you allocate memory, you hold a connection, and you fail with a deadline exceeded right at the end. Better to fail at the front door. The client gets a quick 503 and can decide whether to retry against a different replica, fall back to a cached answer, or surface the failure to the user. Anything is better than burning a worker for nothing.</p>
+<p>A note on the status code. RFC 9110 Section 15.6.5 defines 504 (Gateway Timeout) narrowly as the case where a gateway or proxy did not receive a timely response from an <em>upstream</em> server. A leaf service that runs out of budget on its own is not strictly a gateway, so 504 is a bit of a stretch of the spec. 503 Service Unavailable with <code>Retry-After: 0</code> is the more defensible framing, and <code>Retry-After</code> is canonically paired with 503 and 429 rather than 504 (RFC 9110 Section 10.2.3, <a href="https://httpwg.org/specs/rfc9110.html#field.retry-after">https://httpwg.org/specs/rfc9110.html#field.retry-after</a>). Some shops reach for 504 anyway because the failure is morally a deadline-driven one and they want it bucketed with their other timeout metrics. Either is workable as long as you are consistent across the fleet.</p>
+<p>The <code>slush</code> parameter on the client side is the gap you reserve for yourself. If the downstream call returns at exactly the deadline, you still need a few millis to write the response, log it, and tear down the connection. There is no spec-blessed number here; in our experience a few millis, typically 5 to 10ms, is usually enough, but you should calibrate against your own teardown costs. Get this wrong in either direction and you will see strange behavior. Too little slush and your service returns a deadline-exceeded to its caller because the upstream deadline fired while you were unwinding. Too much slush and you waste budget the downstream could have spent.</p>
+<h2>The gRPC and HTTP impedance mismatch</h2>
+<p>The annoying part is that real graphs mix protocols. The edge gateway is HTTP. The orchestrator talks gRPC to most internal services. Inventory calls a vendor SOAP endpoint because of course it does. Each protocol has its own deadline convention. Translating between them is the part you have to write carefully.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Protocol</th>
+<th>Carrier</th>
+<th>Format</th>
+<th>Default behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>gRPC</td>
+<td><code>grpc-timeout</code> header</td>
+<td>duration suffix (<code>500m</code>, <code>2S</code>, <code>1H</code>)</td>
+<td>Server-side context has deadline pre-set</td>
+</tr>
+<tr>
+<td>HTTP (homegrown)</td>
+<td>custom header</td>
+<td>epoch ms or remaining ms</td>
+<td>Whatever middleware you wrote</td>
+</tr>
+<tr>
+<td>Kafka/queue</td>
+<td>message header</td>
+<td>epoch ms</td>
+<td>Consumer must check before processing</td>
+</tr>
+<tr>
+<td>SOAP (vendor)</td>
+<td>nothing</td>
+<td>nothing</td>
+<td>You set a client-side timeout and pray</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>When a gRPC server calls an HTTP downstream, you need a thin shim that reads the gRPC context deadline and writes it into your custom HTTP header. When an HTTP service calls a gRPC downstream, you do the reverse: read your custom header into a context with deadline, then let the gRPC client library forward it as <code>grpc-timeout</code> automatically.</p>
+<p>For the queue case, the message producer stamps the deadline into a header at enqueue time. The consumer checks the deadline before doing any work, and if the message has been sitting in the queue too long, drops it on the floor. This is how you avoid the classic &quot;Black Friday flood pushes a job to the front of the queue three hours later and we charge someone&#39;s card for a sweater they no longer want&quot; failure mode.</p>
+<h2>The 200ms tail nobody could see</h2>
+<p>Back to the checkout incident. Once we threaded deadlines end to end, the 200ms tail showed up immediately. <code>reco-scorer</code> had a defensive 30 second client timeout to its model serving sidecar. The sidecar was hitting a stale cached model that took 180ms to evaluate on a hot path that was supposed to take 5ms. Nobody had noticed because the 30 second timeout was so loose that even pathological evaluations always finished inside it. The user had given up, but the backend was still chewing.</p>
+<p>Once deadlines were propagated, <code>reco-scorer</code> started getting requests with 80ms of budget left and refusing them with deadline-too-short. Recommendation quality dropped slightly. Latency dropped enormously. We then went and fixed the actual bug in the sidecar, because we could finally see it.</p>
+<p>This is the underrated benefit of deadline propagation. Loose timeouts hide problems. Tight, propagated deadlines surface them. The deadline-too-short rejection rate at deeper services becomes a real signal. You can plot &quot;fraction of requests where this service received less than 50ms of budget&quot; and you have a beautiful early warning for upstream regressions.</p>
+<pre class="mermaid">flowchart LR
+    A[client 500ms budget] --&gt;|deadline header| B[edge]
+    B --&gt;|480ms left| C[orchestrator]
+    C --&gt;|420ms left, parallel fanout| D[pricing]
+    C --&gt;|420ms left, parallel fanout| F[inventory]
+    D --&gt;|380ms left| E[tax-calc]
+    F --&gt;|360ms left| G[warehouse]
+    G --&gt;|300ms left| H[reco-scorer]
+    H --&gt; I{remaining below minBudget?}
+    I --&gt;|yes, 503 fast| J[return immediately]
+    I --&gt;|no| K[do work]</pre>
+<p>Each edge label is the budget the downstream sees on arrival; gaps between hops are network plus the caller&#39;s own processing time.</p>
+<h2>Things that bite you</h2>
+<p>A few sharp edges worth mentioning.</p>
+<p><strong>Clock skew.</strong> If you encode the deadline as an epoch timestamp and your fleet&#39;s clocks drift by 100ms, services with slow clocks will think they have more budget than they do, and services with fast clocks will reject perfectly valid work. NTP with a low stratum number (stratum 2 or better, where stratum-1 servers are directly attached to a stratum-0 reference clock such as a GPS or atomic source per RFC 5905, <a href="https://datatracker.ietf.org/doc/html/rfc5905">https://datatracker.ietf.org/doc/html/rfc5905</a>) and active monitoring on drift is non-negotiable. If you cannot trust clocks, use remaining-millis encoding and accept the small bias from each hop&#39;s clock during the subtract step.</p>
+<p><strong>Retries that ignore deadlines.</strong> Any retry policy on the call path must check remaining budget before each attempt; the safe-retry mechanics themselves (idempotency keys, at-least-once handling) are out of scope here and covered separately in the idempotency-keys post.</p>
+<p><strong>Streaming responses.</strong> A long-poll or server-sent events endpoint does not have a single deadline. It has a connection lifetime. Trying to apply request-level deadline propagation to a streaming endpoint will cut the stream off at the deadline. You probably want the deadline to apply to time-to-first-byte, not total stream duration. This needs to be handled explicitly per endpoint.</p>
+<p><strong>Background work spawned from a request.</strong> A request comes in, does its main work, returns to the user, and asynchronously kicks off a &quot;send confirmation email&quot; task. That async task should <em>not</em> inherit the request deadline. It needs a separate, longer deadline rooted at the moment the async work was scheduled. Forgetting this means your async work cancels itself the moment the user&#39;s response goes out.</p>
+<p><strong>Cancellation does not propagate up the call chain automatically.</strong> When your context deadline fires, your in-flight downstream calls will return a deadline-exceeded error. Good. But if you were doing fan-out work, you need to actively cancel the sibling calls too. Most well-behaved client libraries do this when you cancel the context, but custom code often does not. Audit your fan-out code paths.</p>
+<h2>The minimum viable rollout</h2>
+<p>If you are starting from a fleet with no deadline propagation, the cheapest sequence I have seen work:</p>
+<ol>
+<li>Pick a header name. Write it down. Get every team to agree before you write any code.</li>
+<li>Add the middleware to one service. Make it permissive: if no deadline arrives, use the existing timeout default. Log &quot;no deadline received&quot; as a counter.</li>
+<li>Add the client-side forwarding to that same service for one downstream call.</li>
+<li>Watch the &quot;no deadline received&quot; counter on the downstream. It should drop to zero from that one upstream.</li>
+<li>Walk the graph. Add middleware and forwarding service by service. Each addition causes the deadline-too-short counter to climb at the receiving service. That is the signal you are uncovering actual problems.</li>
+<li>Once the graph is covered, ratchet the upstream defaults down to realistic values. Now the deadlines that arrive at the leaves are the real user budget minus real elapsed work, not some random 30 second placeholder.</li>
+</ol>
+<p>You will get pushback from teams who say &quot;but my service genuinely needs 30 seconds for some workloads.&quot; Sometimes that is true. The answer is not to skip deadline propagation, it is to admit that those workloads should not be on the synchronous user request path. Move them to a job queue with its own deadline semantics, return a job ID to the user, and let the frontend poll. Then the synchronous path can get tight deadlines and you stop pretending a 30 second p99 is acceptable for an interactive button click.</p>
+<p>The checkout team&#39;s p99.9 dropped from 12 seconds to under 900ms within two weeks of full propagation. The work was almost entirely plumbing. The hard part was getting six teams to agree on a header name.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

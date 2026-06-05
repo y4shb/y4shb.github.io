@@ -1,0 +1,194 @@
+# Designing CLI subcommand hierarchies that scale past twenty verbs
+
+*the awkward middle age of an internal tool, where `--help` becomes a wall of text and nobody remembers the flag order*
+
+A fleet management CLI starts out as five verbs. `provision`, `reboot`, `drain`, `status`, `logs`. Nobody writes a design doc. Somebody adds `cordon`, then `uncordon`, then `quarantine`. Six months in there are nineteen verbs, and the on-call runbook has phrases like "remember that `recover` is different from `reset`, and `restart` is just `reboot` for the BMC."
+
+That is the wall. Not when the tool stops working, but when new hires need to read source to figure out which verb does the thing they want. Fixing it is mostly taxonomy, partly muscle memory, and slightly a fight about whether `fleet host reboot` reads better than `fleet reboot host`.
+
+I refactored one of these recently. A tool called `flx` had grown to 34 top-level verbs over two years. The hierarchy rewrite cut discovery time for new operators from "grep the help text" to "tab through the first noun." A separate change, adding aliases for the four most-used verbs, cut average command length from 47 keystrokes to 24 across a month of shell history from a small operator group. Most of the keystroke win came from aliases; the hierarchy bought discoverability. Here is what worked, what didn't, and the parts I would do differently.
+
+## What flat sprawl actually looks like
+
+The starting point looked like this in `--help`:
+
+```
+flx 1.0
+USAGE: flx <command> [args...]
+
+COMMANDS:
+  provision      reboot         restart        drain
+  cordon         uncordon       quarantine     release
+  status         describe       inspect        logs
+  events         topology       neighbors      power
+  bmc-reset      bmc-update     bmc-status     firmware
+  pkg-list       pkg-install    pkg-remove     pkg-pin
+  user-add       user-remove    user-list      role-grant
+  role-revoke    audit          export         import
+  diff           snapshot
+```
+
+Thirty-four verbs, no grouping, alphabetical for politeness. The problems compound:
+
+- `reboot` and `restart` and `bmc-reset` overlap in a way only the original author understood
+- `pkg-*` and `user-*` and `bmc-*` and `role-*` are clearly noun prefixes pretending to be verbs
+- tab completion offers thirty-four options after `flx <TAB>`, which is the same as offering zero
+- the help text scrolls past one screen on a 24-line terminal, so the bottom verbs are functionally invisible
+- nobody can remember whether the snapshot verb takes a hostname first or a snapshot name first, because the entire surface is positional and inconsistent
+
+The `pkg-`, `user-`, `bmc-`, `role-` prefixes are the tell. The team had already been grouping informally with hyphens, they just hadn't promoted the grouping to syntax. That is the moment to introduce a second level.
+
+## Three taxonomies, briefly
+
+Before redesigning anything, pick a shape. There are three serious options, and the choice cascades through completion, docs, and aliases.
+
+| layout | example | strengths | weaknesses |
+|---|---|---|---|
+| verb-first | `flx reboot host h-42` | reads like English, short for one-off actions | verbs collide across nouns (reboot host vs reboot bmc), help becomes a verb dump |
+| noun-first | `flx host reboot h-42` | groups by object, completion narrows fast, scales to hundreds of verbs | feels backwards for muscle-memory verbs (`flx host status` vs `flx status`) |
+| capability-grouped | `flx ops reboot host h-42` | clean for permission boundaries (ops vs admin vs read), nice for RBAC | extra typing for every command, the top level is abstract and nobody likes guessing |
+
+`git` is verb-first and got away with it because the verbs are universal enough (`clone`, `commit`, `push`) that you don't fight muscle memory. It also has well over a hundred verbs across porcelain and plumbing (https://git-scm.com/docs/git), which is why `git help -a` is unreadable and why every team has a wiki page of "the seven git commands you actually need."
+
+`kubectl` is verb-first at the top (`get`, `describe`, `apply`, `delete`) but the noun comes second and is required (`kubectl get pods`), with a few noun-first exceptions like `kubectl rollout` and `kubectl config`. This works because the verbs are a small closed set (about a dozen) and the nouns are open (custom resources). If your verb count is bigger than your noun count, this falls apart.
+
+`aws` and `gcloud` group by service noun first (`aws ec2 ...`, `gcloud compute instances ...`), though individual operations are themselves verb-noun (`describe-instances` (https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instances.html), `instances list`). They have hundreds of nouns and thousands of leaf commands. The noun-first shape is the only one that survives at that scale, because tab completion at each level prunes the tree by an order of magnitude.
+
+For fleet management, noun-first was the right call. The verb count was bigger than the noun count (34 verbs across ~6 implicit nouns), and the actions naturally cluster by what they act on. The verbs are also not universal: `drain` means something specific to a host, `pin` means something specific to a package version, and pretending they are general verbs invites collisions.
+
+## The target shape
+
+We landed on three top-level nouns plus one escape hatch:
+
+```
+flx host    <verb>  [args]   # anything that acts on a physical machine
+flx pkg     <verb>  [args]   # firmware, BMC images, OS packages
+flx access  <verb>  [args]   # users, roles, audit
+flx ops     <verb>  [args]   # snapshots, exports, cross-cutting
+```
+
+`ops` is the escape hatch for "this doesn't fit a noun" commands. Every CLI of size has one. Resist the urge to make it bigger than the real nouns. If `ops` grows past about five verbs, you missed a noun.
+
+Under each noun, verbs are short and consistent. Same verbs mean the same thing across nouns where possible:
+
+```
+flx host reboot h-42
+flx host drain h-42
+flx host status h-42
+flx host logs h-42 --since 10m
+flx host quarantine h-42 --reason "PSU flapping"
+
+flx pkg install firmware-bmc-1.4.2 --to h-42
+flx pkg list --installed --on h-42
+flx pkg pin firmware-bmc-1.4.2 --on h-42
+flx pkg diff h-42 h-43
+
+flx access user add alice --role operator
+flx access role grant operator reboot,drain
+flx access audit --since 24h --user alice
+
+flx ops snapshot create --tag pre-upgrade
+flx ops export inventory --format json
+```
+
+The verbs that did the same thing under different names (`reboot`, `restart`, `bmc-reset`) collapsed into `flx host reboot` with a `--target {os,bmc}` flag, default `os`. The verbs that were noun-prefix masquerades (`pkg-install`, `user-add`) lost the prefix and became proper subcommands. The catch-all verbs (`describe`, `inspect`) merged into `status` with verbosity flags.
+
+Total verb count under the new tree: still 34. Conservation of complexity is real. But each noun's `--help` now shows 8-12 verbs, which fits on a screen, and tab completion at the first level offers four options instead of thirty-four.
+
+## When to introduce the second level
+
+The rule I use, post-fact rationalized: introduce a noun layer when any of the following is true.
+
+- You have more than 12-15 top-level verbs and `--help` no longer fits on one screen.
+- You see informal noun-prefixing in the verb names (`pkg-install`, `bmc-reset`).
+- The same verb means meaningfully different things depending on context (`reboot` a host vs `reboot` a service).
+- You want RBAC boundaries that map cleanly to subtrees (read-only users get `host status` and `host logs` but not `host *`).
+- Tab completion at the top level returns enough options that users ignore it and type the verb from memory.
+
+Fewer than 12 verbs and you're better off staying flat. The second level adds typing for everyone in exchange for organization that doesn't pay off at small scale. `cat`, `ls`, `grep` are flat and will be flat forever, correctly.
+
+The breakeven point is somewhere around 15 verbs in my experience, but I've never measured it rigorously. The more honest signal is when you find yourself writing internal docs that say "to do X, run `flx foo`; not to be confused with `flx bar` which is similar but different." That sentence means you needed the noun layer two verbs ago.
+
+## Aliases for muscle memory
+
+The hard truth about reorganizing a CLI people use every day: the on-call team will hate you for two weeks. Every command they have wired into shell history and runbooks is wrong. Aliases are how you buy goodwill.
+
+Two flavors matter:
+
+**Top-level shortcuts** for the verbs that account for the bulk of daily use. Track shell history for a week and ship a config:
+
+```
+flx reboot       -> flx host reboot
+flx status       -> flx host status
+flx logs         -> flx host logs
+flx drain        -> flx host drain
+```
+
+These are the four commands that accounted for ~70% of invocations in the history. Aliasing them at the top level means muscle memory keeps working, while the new hierarchy is there for everything else. You print a deprecation notice in stderr for the first month and then quietly leave them in forever, because nobody is going to retype `flx host reboot` ten times an hour when `flx reboot` works.
+
+**Compact paths** for common drilldowns:
+
+```
+flx h <id>       -> flx host status <id>
+flx hl <id>      -> flx host logs <id>
+```
+
+Two-letter aliases are aggressive but they earn their keep for the commands you run dozens of times an hour. The convention I like: first letter of each noun in the path. `hl` is unambiguous; `hs` would conflict with future shorthand for `host snapshot` so we left it out.
+
+The deprecation policy that worked: aliases are forever; only the long-deprecated `pkg-install`-style hyphenated forms got a real removal date. Hyphen-prefixed legacy verbs printed:
+
+```
+WARN: 'flx pkg-install' is deprecated and will be removed in v2.0 (2026-09-01).
+      Use 'flx pkg install' instead.
+```
+
+Three releases later, the legacy forms were gone. The single-word aliases (`reboot`, `status`, `logs`) stayed.
+
+## Tab completion that stays useful
+
+A noun-first layout only pays off if tab completion is wired correctly. Three things matter.
+
+First, **dynamic completion at every level**. Static completion that lists subcommands is table stakes, but the leaf often takes a hostname or package name, and that needs to talk to the live inventory:
+
+```bash
+# bash completion stub, the real one is generated
+# real implementation uses null-separated output and `mapfile` to handle spaces in names
+_flx() {
+  local cur prev words cword
+  _init_completion || return
+  case "$cword" in
+    1) COMPREPLY=($(compgen -W "host pkg access ops" -- "$cur")) ;;
+    2) COMPREPLY=($(compgen -W "$(flx __complete verbs ${words[1]})" -- "$cur")) ;;
+    *) COMPREPLY=($(compgen -W "$(flx __complete args ${words[1]} ${words[2]})" -- "$cur")) ;;
+  esac
+}
+complete -F _flx flx
+```
+
+The `__complete` subcommand is hidden, returns whitespace-separated tokens, and caches inventory lookups for a few seconds so hitting tab repeatedly doesn't hammer the API. Without dynamic completion, the user types `flx host reboot h-` and stares at a blinking cursor, which is worse than no completion at all.
+
+Second, **help integration**. `flx host` with no verb should print the verbs under `host` with one-line descriptions, not error out. `flx host --help` should be the same thing with more detail. `flx host reboot --help` should show flags and an example. All three should work without arguments, which sounds obvious until you find a CLI where the top-level `--help` is great and `flx host --help` segfaults.
+
+Third, **fuzzy matching for typos**. If a user types `flx host rebot`, the CLI should suggest `reboot` rather than erroring:
+
+```
+$ flx host rebot h-42
+error: 'rebot' is not a valid verb under 'host'
+did you mean: reboot? (run 'flx host --help' for a list)
+```
+
+Damerau-Levenshtein distance of 2 or less is the usual cutoff (it handles single-character transpositions as one edit, which catches the most common typos). Don't auto-correct, just suggest. Auto-correction across destructive verbs is how you reboot the wrong fleet.
+
+## The migration cost, honestly
+
+The restructure took about three weeks of one engineer's time, plus a week of fixing runbook references, plus a week of dashboards calling shell scripts that called the CLI. The actual code refactor was a day. The rest was migration.
+
+What I'd do differently:
+
+- Ship the aliases on day one, not day fourteen. We thought we'd be fine without `flx reboot` aliasing and got loud feedback within hours.
+- Generate the completion scripts in CI from a single source of truth instead of hand-maintaining bash, zsh, and fish versions. We did this eventually but should have started there.
+- The hidden `__complete` subcommand needs a stable contract. We changed its output format once and broke completion for everyone who hadn't reinstalled the completion script. Treat it like a public API.
+
+As noted up top, the keystroke halving came from aliases, not hierarchy. The hierarchy's payoff is discoverability: new hires can guess `flx host` and see what verbs exist, instead of grepping the help output for whichever verb sounds right.
+
+That is the actual win. The CLI is no longer a closed-book exam.

@@ -1,0 +1,43 @@
+# Yash Bhardwaj
+
+> Senior Software Engineer at AMD (Bengaluru). Backend systems, developer tools, GPU firmware CI, LLM log triage. Maker of DCAuto, Sherlog Holmes, and the Qualcomm Software Center macOS universal build.
+
+The canonical homepage is https://y4shbhardwaj.com. Each article and project has a raw Markdown source and a prerendered HTML version. Markdown is recommended for ingestion, HTML for citation.
+
+## About
+- [Home](https://y4shbhardwaj.com/): Bio, experience, projects, articles, and contact.
+- [Resume PDF](https://y4shbhardwaj.com/YashBhardwaj.pdf): Resume.
+- [GitHub](https://github.com/y4shb): Source repositories.
+- [LinkedIn](https://www.linkedin.com/in/yash-bhardwaj-x): Professional profile.
+
+## Projects
+- [DCAuto](https://y4shbhardwaj.com/project/dcauto.html): Firmware CI fabric for MI450 data-center GPUs. Orchestrates deployments and validation across physical test systems, with idempotent self-check-in and fallback-recovery flows.
+- [Sherlog Holmes](https://y4shbhardwaj.com/project/sherlog.html): Five-stage failure triage for 50,000-line GPU firmware logs. Embeddings plus FAISS search plus LLM root-cause analysis, shipped as Flask APIs and Celery workers over Azure Service Bus and MongoDB, with Teams alerts.
+- [Qualcomm Software Center](https://y4shbhardwaj.com/project/qsc.html): Electron app delivering drivers to global OEMs in Node, Angular, and TypeScript. Shipped the first macOS universal build (Intel and Apple Silicon); automated Jenkins and AWS CI/CD to cut release times by 50%.
+
+## Articles
+- [Paging on symptoms versus causes without doubling oncall load](https://y4shbhardwaj.com/article/20-paging-symptoms-versus-causes-oncall-load.html): The textbook says page on symptoms. The textbook has never carried your pager
+- [Why your load test lies: open versus closed workload models](https://y4shbhardwaj.com/article/19-load-test-open-versus-closed-workload.html): A 12ms p99 that turns into 340ms the moment you stop politely waiting
+- [Designing CLI subcommand hierarchies that scale past twenty verbs](https://y4shbhardwaj.com/article/18-cli-subcommand-hierarchies-twenty-verbs.html): the awkward middle age of an internal tool, where --help becomes a wall of text and nobody remembers the flag order
+- [Error budget math when your SLO has correlated dependencies](https://y4shbhardwaj.com/article/17-error-budget-math-correlated-dependencies.html): Multiplying availability numbers across services assumes failures are independent. They are not, and the gap is where your pager lives
+- [Designing audit logs that survive a hostile insider review](https://y4shbhardwaj.com/article/16-audit-logs-hostile-insider-review.html): Append-only is not the same as tamper-evident, and your SRE knows where the log volume is mounted
+- [The exactly-once myth and what idempotency actually buys you](https://y4shbhardwaj.com/article/15-exactly-once-myth-idempotency-buys-you.html): Brokers promise once; networks deliver many; your database decides what counts
+- [Adaptive concurrency limits with gradient and Little's law](https://y4shbhardwaj.com/article/14-adaptive-concurrency-limits-gradient-littles-law.html): Why your 200-thread pool is a hardcoded apology for not measuring anything
+- [Deadline propagation across service hops without losing context](https://y4shbhardwaj.com/article/13-deadline-propagation-across-service-hops.html): A 500ms budget is not 500ms at hop six unless every hop knows what it already spent
+- [Expand and contract schema migrations on busy tables](https://y4shbhardwaj.com/article/12-expand-contract-schema-migrations-busy-tables.html): Five phases, each with its own way to wedge production
+- [Bisecting flaky tests across thousands of runs with statistical scoring](https://y4shbhardwaj.com/article/11-bisecting-flaky-tests-statistical-scoring.html): Retry budgets buy time. Ranking buys fixes
+- [Cancellation and cleanup in long-running task workers](https://y4shbhardwaj.com/article/10-cancellation-and-cleanup-in-long-running-workers.html): where workers leak leases, half-write files, and lose jobs between SIGTERM and exit
+- [Hot-shard pitfalls when you key by hostname](https://y4shbhardwaj.com/article/09-hot-shard-pitfalls-keying-by-hostname.html): A short tour through the day your evenly-sharded topic stops being evenly sharded
+- [Turning RAS telemetry into actionable signals](https://y4shbhardwaj.com/article/08-ras-telemetry-into-actionable-signals.html): Coalesce, correlate, then alert: turning the kernel firehose into a pager queue you can defend.
+- [Reverse-tunnel agents for hosts you cannot reach](https://y4shbhardwaj.com/article/07-reverse-tunnel-agents-for-unreachable-hosts.html): Patterns for boxes you cannot SSH into directly
+- [Streaming live logs to the browser without WebSockets](https://y4shbhardwaj.com/article/06-streaming-live-logs-without-websockets.html): Four boring transports, one annoying corporate proxy, and the connection budget nobody warns you about
+- [Modeling job lifecycle as a finite state machine](https://y4shbhardwaj.com/article/05-job-lifecycle-as-a-finite-state-machine.html): the cheapest reliability upgrade your job runner will ever get
+- [Idempotency keys for deploy and provisioning endpoints](https://y4shbhardwaj.com/article/04-idempotency-keys-for-deploy-endpoints.html): Stripe shipped this for cards in the mid-2010s. Your control plane is still rolling the dice.
+- [Why your healthcheck endpoint lies](https://y4shbhardwaj.com/article/03-why-your-healthcheck-endpoint-lies.html): A 200 OK is cheap. So is lying.
+- [Crash-only design for test rigs that reboot mid-run](https://y4shbhardwaj.com/article/02-crash-only-design-for-test-rigs.html): A power cable is an aggressive SIGKILL. Design the runner accordingly.
+- [Designing a websocket command broker for long-lived agent connections](https://y4shbhardwaj.com/article/01-websocket-command-broker-long-lived-agents.html): Why your fleet wants to phone home and stay on the line
+
+## Optional
+- [llms-full.txt](https://y4shbhardwaj.com/llms-full.txt): Every article and project body in full.
+- [Articles index JSON](https://y4shbhardwaj.com/articles/_index.json): Machine-readable manifest.
+- [Projects index JSON](https://y4shbhardwaj.com/projects/_index.json): Machine-readable manifest.

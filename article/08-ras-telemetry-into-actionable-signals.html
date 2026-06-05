@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turning RAS telemetry into actionable signals - Yash Bhardwaj</title>
+<meta name="description" content="Coalesce, correlate, then alert: turning the kernel firehose into a pager queue you can defend.">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/08-ras-telemetry-into-actionable-signals.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Turning RAS telemetry into actionable signals - Yash Bhardwaj">
+<meta property="og:description" content="Coalesce, correlate, then alert: turning the kernel firehose into a pager queue you can defend.">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/08-ras-telemetry-into-actionable-signals.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Turning RAS telemetry into actionable signals - Yash Bhardwaj">
+<meta name="twitter:description" content="Coalesce, correlate, then alert: turning the kernel firehose into a pager queue you can defend.">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Turning RAS telemetry into actionable signals","datePublished":"2026-01-09","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/08-ras-telemetry-into-actionable-signals.html"},"url":"https://y4shbhardwaj.com/article/08-ras-telemetry-into-actionable-signals.html","description":"Coalesce, correlate, then alert: turning the kernel firehose into a pager queue you can defend.","keywords":"telemetry, ras, alerting"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">telemetry</span><span class="chip">ras</span><span class="chip">alerting</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Jan 9, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Turning RAS telemetry into actionable signals</h1>
+<p><em>coalesce, correlate, then alert: turning the kernel firehose into a pager queue you can defend</em></p>
+<p>A single RAS event from <code>rasdaemon</code> looks roughly like this:</p>
+<pre><code>mce: [Hardware Error]: Machine check events logged
+EDAC MC0: 1 CE memory read error on CPU_SrcID#0_MC#0_Chan#2_DIMM#1
+  (channel:2 slot:1 page:0x3a124 offset:0x140 grain:32 syndrome:0x0)</code></pre>
+<p>Multiply that by a few hundred classes (memory controllers reporting corrected errors, PCIe links logging recoverable AERs, CPUs emitting MCEs for cache parity hiccups, GPUs surfacing XID events for everything from a tired fan to a dying HBM stack) and a few thousand nodes, and you have a firehose. The kernel dutifully forwards all of it to userspace via <code>/dev/mcelog</code>, <code>rasdaemon</code>, <code>edac</code>, <code>dmesg</code>, or whatever vendor-specific socket happens to be fashionable this quarter.</p>
+<p>Pipe that raw firehose into PagerDuty across a few thousand nodes and the on-call rotation will revolt inside a week. A naive RAS exporter at that scale can easily generate tens of thousands of alerts in the first hour. Reasonable response.</p>
+<p>This post is about the layer between the firehose and the pager. The part where you turn &quot;node-1471 emitted 14 corrected ECC events in the last 30 seconds&quot; into either silence, a dashboard tick, a ticket, or &quot;go physically replace this DIMM before the rack catches a real fault.&quot; Get this layer right and the fleet stays runnable; get it wrong and the pager owns you.</p>
+<p>One acid test threads the whole post: pick any page from last week, ask the on-call whether the outcome would have been identical had you silenced it, count how often the honest answer is yes. Everything below pushes that number down.</p>
+<h2>What RAS events actually look like</h2>
+<p>Strip away the vendor packaging and almost every RAS event has the same shape:</p>
+<pre><code>timestamp     : 2026-06-03T11:42:17.331Z
+node_id       : compute-1471
+component     : DIMM_A2
+severity      : corrected | uncorrected | fatal
+class         : memory | cache | pcie | thermal | power | accelerator
+event_code    : MEM_ECC_CORR
+location      : socket=0 channel=2 dimm=1 rank=0 row=0x3A12 col=0x14
+count         : 1
+raw           : { ...whatever blob the vendor dumped... }</code></pre>
+<p>That&#39;s it. Everything you care about derives from those eight fields plus the right amount of memory about what came before.</p>
+<p>Two fields mislead first-time builders. Severity and count both look authoritative; both lie. A &quot;corrected&quot; event can be a perfectly healthy DIMM doing exactly what ECC was designed to do, or it can be a DIMM about to fail catastrophically. A <code>count=1</code> event can repeat 9,000 times in a minute. You cannot treat individual events as alertable units. You have to treat them as samples from an underlying process.</p>
+<h2>The pipeline shape</h2>
+<p>Here&#39;s the layout that I keep ending up at after building this thing four times. Names are made up.</p>
+<pre><code>   nodes (10k+)
+       |
+       v
++------------------+     +------------------+     +------------------+
+|  node-collector  | --&gt; |    ras-broker    | --&gt; |    coalescer     |
+|    (per-host)    |     | (NATS jetstream  |     |  (sliding wins)  |
+|                  |     |     or Kafka)    |     |                  |
++------------------+     +------------------+     +------------------+
+                                                           |
+                                                           v
+                                                  +------------------+
+                                                  |    correlator    |
+                                                  |   (cross-comp)   |
+                                                  +------------------+
+                                                           |
+                                                           v
+                                       +-----------------------------+
+                                       |  policy engine + thresholds |
+                                       +-----------------------------+
+                                          |          |          |
+                                          v          v          v
+                                      dashboard   ticket      pager</code></pre>
+<p>The collector is dumb on purpose. It tails the kernel sources, normalizes into the canonical event above, attaches a fleet-wide monotonic sequence number, and pushes. No filtering, no thinking. If the collector starts being clever it will mask real failures, and you will find out about them from a customer.</p>
+<p>Everything interesting happens downstream of the broker, where you have the full history available and you&#39;re not running on a node whose memory you&#39;re trying to diagnose.</p>
+<h2>Step one: deduplicate the obvious noise</h2>
+<p>A lot of RAS sources will fire the same event multiple times for the same physical incident. The kernel decodes an MCE bank, the dynamic poller speeds up after a hit (the interval halves on each error with a floor of <code>HZ/100</code>, so on the order of tens of milliseconds and kernel-config dependent; see <code>arch/x86/kernel/cpu/mce/core.c</code> and <code>Documentation/x86/x86_64/machinecheck</code>), decodes the same bank again, emits another event. Some BMCs will mirror the same SEL entry through both IPMI and Redfish.</p>
+<p>First pass is exact dedup on <code>(node_id, component, event_code, location, timestamp_truncated_to_100ms)</code>. A TTL-cached hash set with a 30-second window handles this for cheap. In my experience this drops 20-40% of event volume on a busy fleet without losing information; measure on your own data before quoting a number.</p>
+<pre><code class="hljs language-python">def dedup_key(ev):
+    return (ev.node_id, ev.component, ev.event_code,
+            ev.location, ev.timestamp // 100)  # 100ms buckets
+
+seen = TTLSet(window=30)  # exact membership, no false positives
+for ev in stream:
+    if dedup_key(ev) in seen:
+        metrics.duplicates.inc()
+        continue
+    seen.add(dedup_key(ev))
+    out.publish(ev)</code></pre>
+<p>Quick aside: do not reach for a bloom filter here unless you have profiled and the hash set is actually too big. The false-positive rate is tunable but never zero, and for dedup a false positive means a real RAS event silently disappears. At a 1e-4 FPR the standard formulas (<code>m/n = -log2(p)/ln2</code>, <code>k = (m/n)*ln2</code>; see <code>en.wikipedia.org/wiki/Bloom_filter#Probability_of_false_positives</code>) give roughly 14 bits per element and around 10 hash functions per insert, so you lose roughly one real event in ten thousand. Most production implementations cap <code>k</code> at 7-10, which inflates FPR above the theoretical figure, so measure rather than assume. Smaller filter, worse rate. If memory pressure forces it, pick an FPR explicitly, put it on the dashboard, and emit a &quot;dropped-as-duplicate&quot; counter so somebody can sanity-check the loss.</p>
+<p>This is the cheapest 30% you&#39;ll ever get.</p>
+<h2>Step two: coalesce into incident objects</h2>
+<p>Now the interesting part. Raw events are the wrong unit. The unit you want is an <strong>incident</strong>: &quot;DIMM A2 on node-1471 had a burst of N corrected errors over T seconds.&quot; You make incidents by coalescing events using a sliding window keyed on the physical thing that&#39;s failing.</p>
+<p>The natural coalescing key for memory is <code>(node_id, socket, channel, dimm)</code>. Not <code>(node_id, address)</code>, because address-level coalescing makes you blind to a degrading DIMM that&#39;s flipping bits in many different rows. You want the DIMM as the bucket, even if you log the address-level breakdown inside the incident.</p>
+<p>For PCIe it&#39;s <code>(node_id, segment, bus, device)</code>. For CPU cache it&#39;s <code>(node_id, socket, core, cache_level)</code>. The right key is &quot;the thing you would physically replace.&quot;</p>
+<p>A sliding window implementation that&#39;s been reliable for me:</p>
+<pre><code class="hljs language-python">class IncidentWindow:
+    def __init__(self, window_sec=300, flush_idle_sec=60):
+        self.window = window_sec
+        self.flush_idle = flush_idle_sec
+        self.incidents = {}  # key -&gt; Incident
+
+    def feed(self, ev):
+        key = coalesce_key(ev)
+        inc = self.incidents.get(key)
+        now = ev.timestamp
+        if inc is None or now - inc.last_seen &gt; self.flush_idle:
+            if inc is not None:
+                yield inc.finalize()
+            inc = Incident(key, started=now)
+            self.incidents[key] = inc
+        inc.add(ev)
+        # also flush any incident older than window
+        for k, i in list(self.incidents.items()):
+            if now - i.last_seen &gt; self.window:
+                yield i.finalize()
+                del self.incidents[k]</code></pre>
+<p>The inner sweep above is fine for a sketch but it is O(open_incidents) per event. During a fleet-wide thermal event with tens of thousands of open incidents that loop becomes the bottleneck of the entire pipeline. Replace it in production with one of: a separate periodic flush task that sweeps every few seconds (the simplest fix), a delay queue keyed by expiry time, or a min-heap with lazy invalidation (push a new entry on every update and skip stale entries on pop, since standard heaps cannot cheaply update an existing key). Per-event cost stays O(1) amortized regardless of how many incidents are open.</p>
+<p>Two timeouts matter. <code>flush_idle_sec</code> is &quot;how long with no events before we consider the incident closed and ship it.&quot; Sixty seconds is a reasonable default for memory. <code>window_sec</code> is the hard ceiling: a single incident can&#39;t run forever, otherwise a slowly-degrading part would never trigger an alert because the incident object would just keep growing silently.</p>
+<p>The incident you ship downstream has a much richer shape:</p>
+<pre><code>incident_id    : inc-2026-06-03-compute-1471-DIMM_A2-001
+key            : node=compute-1471 socket=0 channel=2 dimm=1
+started        : 2026-06-03T11:42:17.331Z
+ended          : 2026-06-03T11:44:17.812Z
+duration_sec   : 120
+event_count    : 1500
+event_rate     : 12.5 ev/sec
+severity_max   : corrected
+unique_rows    : 47
+unique_cols    : 312
+unique_banks   : 8
+first_event    : { ... }
+last_event     : { ... }
+worst_event    : { ... }</code></pre>
+<p>Notice <code>unique_rows</code> and <code>unique_banks</code>. These are the difference between &quot;one stuck bit&quot; and &quot;a DIMM losing the will to live.&quot; A stuck bit will repeat the same <code>(row, col, bank)</code> thousands of times. A degrading DIMM will scatter errors across many rows. Coalescing only by count throws this signal away.</p>
+<h2>Step three: correlate across components</h2>
+<p>Half the time the actual failing component is not the one reporting the error. Common cases that look like one bug and are actually another:</p>
+<ul>
+<li>A failing power supply causes voltage ripple on the memory rails, which causes corrected ECC events on every DIMM on that side of the board. If you alert per-DIMM you&#39;ll page on six DIMMs simultaneously when the real fix is one PSU.</li>
+<li>A bad PCIe riser causes correctable AERs on the GPU plugged into it, AND correctable errors on the NVMe plugged into the slot below, AND the BMC will report a thermal anomaly because the GPU is throttling. Three separate alarm sources, one cable.</li>
+<li>A CPU running too hot will throw cache parity MCEs that look exactly like silicon defects until you correlate with the thermal sensor history.</li>
+</ul>
+<p>So after the coalescer, you want a correlator that takes incident objects within a time window and groups them by <strong>physical proximity</strong>. The grouping graph is built from your node inventory: which DIMMs share a memory controller, which slots share a riser, which components share a power rail, which sensors share a cooling zone.</p>
+<pre><code>correlator pseudocode:
+  for each new incident I:
+    related = []
+    for each open incident J in last 120s:
+      if proximity_distance(I, J) &lt;= 2:
+        related.append(J)
+    if related:
+      merge_into_supergroup(I, related)
+    else:
+      open new supergroup(I)</code></pre>
+<p><code>proximity_distance</code> is a graph distance over your hardware topology. Same DIMM = 0. Same memory controller = 1. Same socket = 2. Same node = 3. You usually want to merge at distance &lt;= 2, but it depends on how aggressive you want your &quot;this might be one thing&quot; guess to be.</p>
+<p>Concretely, the topology the correlator walks looks like this for one node:</p>
+<pre><code>                      node:compute-1471          &lt;-- 3
+                     /                 \
+                socket:0           socket:1      &lt;-- 2
+                /     \             /     \
+              MC:0   MC:1         MC:0   MC:1    &lt;-- 1
+             /  \    /  \         /  \    /  \
+           A0  A1  A2  A3       B0  B1  B2  B3   &lt;-- 0 (DIMMs)</code></pre>
+<p>Same DIMM: 0. Same MC, different DIMM: 1. Same socket, different MC: 2. Same node, different socket: 3. PSU and cooling-zone edges sit above the node, so PSU-driven events land at 4+. The graph is the inventory you already have for replacements, reused.</p>
+<p>When you ship a supergroup downstream, you ship the constituent incidents plus a guessed root cause based on which physical layer they share. The policy engine uses this to decide whether to page once or six times.</p>
+<h2>Step four: thresholds that look at rate, not count</h2>
+<p>Now the alerting policy. The common mistake is <code>count &gt; N</code>. The correct thing is almost always a <strong>rate</strong> plus a <strong>dispersion</strong>.</p>
+<p>For corrected memory errors, the rule I&#39;ve landed on (and steal-this-if-you-want). Rules are evaluated in parallel; the highest-severity match wins, not the topmost row:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>incident.event_count &lt; 10 AND incident.unique_rows == 1</td>
+<td>drop (single stuck bit, log to dashboard)</td>
+</tr>
+<tr>
+<td>incident.event_count &lt; 50 AND incident.duration &gt; 3600s</td>
+<td>log to dashboard, no ticket</td>
+</tr>
+<tr>
+<td>incident.event_rate &gt; 1.0/sec sustained for 60s</td>
+<td>ticket, P3</td>
+</tr>
+<tr>
+<td>incident.unique_rows &gt; 10 AND incident.event_count &gt; 100</td>
+<td>ticket, P2 (degrading DIMM)</td>
+</tr>
+<tr>
+<td>incident.event_rate &gt; 10/sec for 30s</td>
+<td>page, P1</td>
+</tr>
+<tr>
+<td>any uncorrected event</td>
+<td>page, P1</td>
+</tr>
+<tr>
+<td>supergroup spans &gt; 4 DIMMs on same memory controller</td>
+<td>page, P1 (controller or PSU)</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The dispersion check (<code>unique_rows &gt; 10</code>) is what catches the slow-burn failures that count-based thresholds miss. A DIMM throwing 200 corrected errors all on the same row is a single bit cell that ECC will handle until the heat death of the universe. A DIMM throwing 200 corrected errors across 47 different rows is going to fail this week. Same count, different physics.</p>
+<p>Walking the earlier incident through this table: <code>inc-2026-06-03-compute-1471-DIMM_A2-001</code> has <code>event_rate=12.5/sec</code> over <code>120s</code> and <code>unique_rows=47</code>. Row 3 matches (rate &gt; 1.0/sec past 60s, P3). Row 4 also matches (unique_rows=47, event_count=1500, P2). Highest severity wins, so it tickets as a P2 &quot;degrading DIMM&quot; with the row-3 match attached as evidence.</p>
+<h2>Rate AND dispersion, not rate alone</h2>
+<p>RAS bursts have a specific pathology: two incidents can have identical rate and wildly different physics. A DIMM throwing 500 corrected errors in two seconds, all on one row, is one stuck cell ECC will mask forever. The same 500 errors scattered across 50 rows is a part that will fail this week. Rate alone cannot tell those apart, so the windowing strategy has to feed both rate and dispersion into the policy engine.</p>
+<p>Two synthetic streams, both 100 events over 60s, both fed into the same 5s sliding windower:</p>
+<pre><code>stuck-bit:   100 events, all on (row=0x3A12, col=0x14)
+scattered:   100 events, across 100 distinct (row,col) pairs
+
+per-5s window output (rate ev/s, unique_locations):
+  t=  0..5    stuck=(1.6, 1)   scattered=(1.6, 8)
+  t=  5..10   stuck=(1.8, 1)   scattered=(1.8, 9)
+  ...
+  t= 55..60   stuck=(1.6, 1)   scattered=(1.6, 8)
+
+over the full 60s:
+  stuck-bit:   rate ~1.6/s   dispersion = 1
+  scattered:   rate ~1.6/s   dispersion = 100</code></pre>
+<p>Identical rates, two-orders-of-magnitude difference in dispersion. Rate-only policy treats them the same; <code>(rate, dispersion)</code> ships the stuck-bit to the dashboard and ticket-queues the scattered one as a degrading DIMM.</p>
+<p>That means each window holds two aggregates: events-per-second and unique-physical-locations. Keep multiple window sizes in parallel and emit the worst pair, because a burst of 500 events in 2 seconds inside a 60s window will look like 8.3/sec average and trip nothing:</p>
+<pre><code>windows = [5s, 15s, 60s, 300s]
+for w in windows:
+    rate       = events_in_window(w) / w
+    dispersion = unique_locations_in_window(w)
+    if rate &gt; rate_threshold[w] or dispersion &gt; disp_threshold[w]:
+        alert(...)</code></pre>
+<p>For the rate path specifically, EWMA reacts to bursts faster than a flat average without overreacting to single spikes:</p>
+<pre><code>ewma = alpha * current_rate + (1 - alpha) * ewma
+# at a 5s sample period, alpha = 0.3 gives an effective time constant
+# tau = period / alpha = 5 / 0.3 ~= 17s, i.e. ~3 samples of memory</code></pre>
+<p><code>tau = period / alpha</code> is the only thing worth remembering. Pick the time constant first, then derive alpha from the sample period. Tuning alpha without thinking about the period is how teams end up with smoothing that silently changes behavior whenever someone retunes the scraper.</p>
+<p>Flat windows for tickets (the count needs to mean something for a human reading it), EWMA for paging (you want to react fast), dispersion always (it is the only signal that catches the slow-burn DIMM death before it becomes an uncorrected event).</p>
+<h2>Backpressure, retries, and what happens when things break</h2>
+<p>The RAS pipeline itself can fail. The broker can lag. The coalescer can OOM during a fleet-wide thermal event when half your fleet is screaming. The correlator can deadlock on a circular proximity edge in your inventory data.</p>
+<p>Collector-to-broker has three honest backpressure choices: drop-oldest (bounded memory, lossy), block-the-producer (the producer is the kernel ring buffer; blocking just shifts the loss), and spill-to-disk (durable until disk fills). Default to spill-to-disk with a bounded in-memory ring on top: events are small, producers are slow on average, and the burst preceding a real failure is exactly what you cannot drop. Cap the spill and export a &quot;bytes currently spilled&quot; metric so you see strain before it breaks.</p>
+<p>Broker retries are at-least-once with idempotent consumers; the dedup stage above is the idempotency mechanism, which is why it goes first. Per-stage retry budgets, not global, so a wedged correlator does not block a healthy ticket sink.</p>
+<p>The failure mode unique to observability: a silent pipeline looks identical to a healthy fleet. There is no negative signal. If a coalescer falls 10 minutes behind and quietly catches up, the on-call sees no events and concludes nothing is wrong, while a row of nodes might be uncorrectable-error-ing into a thermal event nobody knows about. So the rule here: when the pipeline degrades you <strong>escalate, not silence</strong>, and the escalation rides on a separate channel from the data you are doubting.</p>
+<p>Concretely: every stage emits its own health metric to a separate channel, with its own broker, its own retention, and its own pager rule. If the RAS pipeline stops producing health pings, the pager fires from that separate channel, not from any RAS event. This is the smoke alarm for the smoke alarm. Same idea applies recursively, which is why you stop at two layers: at some point you have to trust something.</p>
+<h2>What to put on the dashboard vs. what to page on</h2>
+<p>Final piece: not everything that&#39;s worth knowing is worth waking someone up for. The split I use:</p>
+<p><strong>Pager</strong>: anything uncorrected, anything fatal, any incident with event_rate &gt; 10/sec, any supergroup spanning multiple components, any node that goes from &quot;healthy&quot; to &quot;throwing RAS events&quot; in under a minute.</p>
+<p><strong>Tickets</strong>: degrading-component incidents (high dispersion, sustained over hours), single-DIMM warnings that have repeated across reboots, anything where the predicted-fail probability from your ML model (if you have one, which is its own post) crosses 30%.</p>
+<p><strong>Dashboard only</strong>: everything else. Yes, even the single corrected ECC errors. They&#39;re not actionable individually but the <strong>rate of them across the fleet</strong> is a leading indicator of bad batches, bad firmware revs, or environmental issues in a specific row of the datacenter. You want them visible, not paged.</p>
+<p>The acid test for whether your RAS pipeline is good: pick a random page from last week and ask the on-call &quot;did you do something different because of this page, or would the outcome have been identical if I&#39;d silenced it?&quot; If the answer is &quot;identical&quot; more than 20% of the time, your thresholds are too aggressive and you&#39;re training the team to ignore the pager. Tighten the rules. Move borderline cases down to tickets. Trust the dashboard for the long tail.</p>
+<p>RAS data is valuable in aggregate; the on-call only needs the 1% of events that change behaviour. Build the pipeline that separates the two.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

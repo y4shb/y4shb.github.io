@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DCAuto - Yash Bhardwaj</title>
+<meta name="description" content="Firmware CI fabric for MI450 data-center GPUs. Orchestrates deployments and validation across physical test systems, with idempotent self-check-in and fallback-recovery flows.">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/project/dcauto.html">
+<meta property="og:type" content="website">
+<meta property="og:title" content="DCAuto - Yash Bhardwaj">
+<meta property="og:description" content="Firmware CI fabric for MI450 data-center GPUs. Orchestrates deployments and validation across physical test systems, with idempotent self-check-in and fallback-recovery flows.">
+<meta property="og:url" content="https://y4shbhardwaj.com/project/dcauto.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="DCAuto - Yash Bhardwaj">
+<meta name="twitter:description" content="Firmware CI fabric for MI450 data-center GPUs. Orchestrates deployments and validation across physical test systems, with idempotent self-check-in and fallback-recovery flows.">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"CreativeWork","headline":"DCAuto","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/project/dcauto.html"},"url":"https://y4shbhardwaj.com/project/dcauto.html","description":"Firmware CI fabric for MI450 data-center GPUs. Orchestrates deployments and validation across physical test systems, with idempotent self-check-in and fallback-recovery flows.","keywords":"Python, Flask, Celery, Azure"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--project">project</span><div class="meta-tags" aria-label="Tags"><span class="chip">Python</span><span class="chip">Flask</span><span class="chip">Celery</span><span class="chip">Azure</span></div></div><div class="meta-bottom"><span class="meta-read">4 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-kicker">SENIOR SDE @ AMD - 2025-PRESENT</span></div></div><div id="content" data-prebaked="1"><h1>DCAuto</h1>
+<p><em>A firmware CI fabric for data-center GPUs, built so a single flaky node never stalls a run.</em></p>
+<p>DCAuto is the platform my team uses to run firmware regressions on the next generation of AMD data-center GPUs. The shape of the problem is this: there are racks of physical test systems sitting in several labs, each one holding a GPU under test, and the firmware team needs a way to ship a build, flash it, run a battery of validation suites, and get the answer back without anyone walking into the lab. Multiply that by a few hundred boards and a few thousand suites a day and the orchestration is the entire product.</p>
+<p>I joined the platform team and picked up the slice that matters most when a lab is busy: how a system enters a run, what it does when it falls over mid-run, and how it gets itself back into a state the orchestrator is willing to schedule onto again. That is unglamorous work. It is also the work that decides whether the team trusts the platform or starts running things by hand.</p>
+<h2>What was actually broken</h2>
+<p>The first version of the orchestrator assumed test systems were well behaved. A run would start, the orchestrator would shell into each board, kick off the suite, and wait for the report. If a board hung, the run hung. If a board rebooted into a bad kernel, the orchestrator did not notice until the suite timed out an hour later. If two runs landed on the same board because of a race in the scheduler, the second one would happily clobber the first. None of these were rare events. With a hundred-board pool, something interesting happens to at least one board every few minutes.</p>
+<p>The pattern was the same every time. The platform assumed it was the source of truth about what the board was doing, and the board itself had no voice in the matter. So I flipped that.</p>
+<h2>Self-check-in</h2>
+<p>The change was to put a small agent on every test system whose only job was to tell the orchestrator the truth about its own state, on its own cadence. On boot the agent reads its identity, dials home, and announces itself with a fresh boot id. The orchestrator keeps a registry keyed by board, and the agent refreshes its lease in the registry every few seconds. If the lease lapses, the board is presumed offline and the scheduler will not target it.</p>
+<p>That sounds obvious in retrospect. The hard part was making it idempotent. If a board reboots in the middle of a run, the agent comes back up with a new boot id, finds a stale registry entry for itself, and needs to take ownership without leaving the previous run in some half-finished state. The takeover is a small atomic operation in the registry that says &quot;I know about the previous boot id, here is mine, and here is what I think happened to the run.&quot; The orchestrator can then make a clean decision: retry the suite, mark it failed and move on, or hand it to a human if the board looks unhealthy. The board never has to lie about its history to get back into the pool.</p>
+<h2>Fallback recovery</h2>
+<p>The second slice was what happens when something goes wrong that the agent itself cannot fix. A wedged kernel. A flashing tool that hung. A power cycle that came up into the wrong boot slot. The orchestrator used to give up at this point and page a lab tech. Most of the time the right answer was a power cycle and a re-flash to a known-good firmware, and that is a sequence the platform already knew how to perform on every board.</p>
+<p>So I wrote the recovery flow as an explicit state machine that the orchestrator runs whenever a board misses a few leases in a row. It tries the cheap thing first (a soft reboot through the agent), and escalates to harder things (a remote power cycle, a re-image to the last-known-good slot, a full reprovision) only when the cheap thing has not worked. Each step is logged with enough detail that you can look at any board and answer &quot;what did the platform try, in order, before it gave up on you,&quot; which is the question the lab techs always ask.</p>
+<h2>What shipped</h2>
+<p>The piece I am most proud of is the boring one. The platform now treats a missing board, a rebooted board, and a freshly imaged board as three flavors of the same event, and the orchestrator never has to special-case any of them. A run that used to stall on a single bad node now drops that node and keeps going. The agent is the only thing on the system that talks to the registry, so there is one code path to reason about, and the registry itself is the source of truth that the dashboards, the scheduler, and the recovery flow all read from.</p>
+<p>It is still firmware CI underneath. The interesting parts are still in the validation suites, the bring-up scripts, the people on the firmware team who know what a failing test actually means. What changed is that the platform stopped being a thing they had to babysit.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

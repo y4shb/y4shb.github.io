@@ -1,0 +1,301 @@
+{
+  "kind": "article",
+  "items": [
+    {
+      "slug": "01-websocket-command-broker-long-lived-agents",
+      "file": "01-websocket-command-broker-long-lived-agents.md",
+      "title": "Designing a websocket command broker for long-lived agent connections",
+      "kicker": "ESSAY",
+      "subtitle": "Why your fleet wants to phone home and stay on the line",
+      "date": "2025-11-04",
+      "tags": [
+        "websockets",
+        "fleet",
+        "agents"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "02-crash-only-design-for-test-rigs",
+      "file": "02-crash-only-design-for-test-rigs.md",
+      "title": "Crash-only design for test rigs that reboot mid-run",
+      "kicker": "ESSAY",
+      "subtitle": "A power cable is an aggressive SIGKILL. Design the runner accordingly.",
+      "date": "2025-11-12",
+      "tags": [
+        "reliability",
+        "hardware"
+      ],
+      "readMin": 11,
+      "enabled": true
+    },
+    {
+      "slug": "03-why-your-healthcheck-endpoint-lies",
+      "file": "03-why-your-healthcheck-endpoint-lies.md",
+      "title": "Why your healthcheck endpoint lies",
+      "kicker": "ESSAY",
+      "subtitle": "A 200 OK is cheap. So is lying.",
+      "date": "2025-11-19",
+      "tags": [
+        "observability",
+        "healthchecks"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "04-idempotency-keys-for-deploy-endpoints",
+      "file": "04-idempotency-keys-for-deploy-endpoints.md",
+      "title": "Idempotency keys for deploy and provisioning endpoints",
+      "kicker": "ESSAY",
+      "subtitle": "Stripe shipped this for cards in the mid-2010s. Your control plane is still rolling the dice.",
+      "date": "2025-12-02",
+      "tags": [
+        "api",
+        "idempotency",
+        "control-plane"
+      ],
+      "readMin": 11,
+      "enabled": true
+    },
+    {
+      "slug": "05-job-lifecycle-as-a-finite-state-machine",
+      "file": "05-job-lifecycle-as-a-finite-state-machine.md",
+      "title": "Modeling job lifecycle as a finite state machine",
+      "kicker": "ESSAY",
+      "subtitle": "the cheapest reliability upgrade your job runner will ever get",
+      "date": "2025-12-08",
+      "tags": [
+        "jobs",
+        "state-machines"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "06-streaming-live-logs-without-websockets",
+      "file": "06-streaming-live-logs-without-websockets.md",
+      "title": "Streaming live logs to the browser without WebSockets",
+      "kicker": "ESSAY",
+      "subtitle": "Four boring transports, one annoying corporate proxy, and the connection budget nobody warns you about",
+      "date": "2025-12-21",
+      "tags": [
+        "streaming",
+        "logs",
+        "http"
+      ],
+      "readMin": 11,
+      "enabled": true
+    },
+    {
+      "slug": "07-reverse-tunnel-agents-for-unreachable-hosts",
+      "file": "07-reverse-tunnel-agents-for-unreachable-hosts.md",
+      "title": "Reverse-tunnel agents for hosts you cannot reach",
+      "kicker": "ESSAY",
+      "subtitle": "Patterns for boxes you cannot SSH into directly",
+      "date": "2026-01-06",
+      "tags": [
+        "networking",
+        "ssh",
+        "agents"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "08-ras-telemetry-into-actionable-signals",
+      "file": "08-ras-telemetry-into-actionable-signals.md",
+      "title": "Turning RAS telemetry into actionable signals",
+      "kicker": "ESSAY",
+      "subtitle": "Coalesce, correlate, then alert: turning the kernel firehose into a pager queue you can defend.",
+      "date": "2026-01-09",
+      "tags": [
+        "telemetry",
+        "ras",
+        "alerting"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "09-hot-shard-pitfalls-keying-by-hostname",
+      "file": "09-hot-shard-pitfalls-keying-by-hostname.md",
+      "title": "Hot-shard pitfalls when you key by hostname",
+      "kicker": "ESSAY",
+      "subtitle": "A short tour through the day your evenly-sharded topic stops being evenly sharded",
+      "date": "2026-01-15",
+      "tags": [
+        "sharding",
+        "kafka",
+        "scaling"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "10-cancellation-and-cleanup-in-long-running-workers",
+      "file": "10-cancellation-and-cleanup-in-long-running-workers.md",
+      "title": "Cancellation and cleanup in long-running task workers",
+      "kicker": "ESSAY",
+      "subtitle": "where workers leak leases, half-write files, and lose jobs between SIGTERM and exit",
+      "date": "2026-01-28",
+      "tags": [
+        "workers",
+        "shutdown",
+        "signals"
+      ],
+      "readMin": 11,
+      "enabled": true
+    },
+    {
+      "slug": "11-bisecting-flaky-tests-statistical-scoring",
+      "file": "11-bisecting-flaky-tests-statistical-scoring.md",
+      "title": "Bisecting flaky tests across thousands of runs with statistical scoring",
+      "kicker": "ESSAY",
+      "subtitle": "Retry budgets buy time. Ranking buys fixes",
+      "date": "2026-02-11",
+      "tags": [
+        "testing",
+        "flakes",
+        "ci"
+      ],
+      "readMin": 11,
+      "enabled": true
+    },
+    {
+      "slug": "12-expand-contract-schema-migrations-busy-tables",
+      "file": "12-expand-contract-schema-migrations-busy-tables.md",
+      "title": "Expand and contract schema migrations on busy tables",
+      "kicker": "ESSAY",
+      "subtitle": "Five phases, each with its own way to wedge production",
+      "date": "2026-02-17",
+      "tags": [
+        "migrations",
+        "databases",
+        "schema"
+      ],
+      "readMin": 12,
+      "enabled": true
+    },
+    {
+      "slug": "13-deadline-propagation-across-service-hops",
+      "file": "13-deadline-propagation-across-service-hops.md",
+      "title": "Deadline propagation across service hops without losing context",
+      "kicker": "ESSAY",
+      "subtitle": "A 500ms budget is not 500ms at hop six unless every hop knows what it already spent",
+      "date": "2026-03-02",
+      "tags": [
+        "microservices",
+        "latency",
+        "deadlines"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "14-adaptive-concurrency-limits-gradient-littles-law",
+      "file": "14-adaptive-concurrency-limits-gradient-littles-law.md",
+      "title": "Adaptive concurrency limits with gradient and Little's law",
+      "kicker": "ESSAY",
+      "subtitle": "Why your 200-thread pool is a hardcoded apology for not measuring anything",
+      "date": "2026-03-19",
+      "tags": [
+        "concurrency",
+        "performance",
+        "limits"
+      ],
+      "readMin": 11,
+      "enabled": true
+    },
+    {
+      "slug": "15-exactly-once-myth-idempotency-buys-you",
+      "file": "15-exactly-once-myth-idempotency-buys-you.md",
+      "title": "The exactly-once myth and what idempotency actually buys you",
+      "kicker": "ESSAY",
+      "subtitle": "Brokers promise once; networks deliver many; your database decides what counts",
+      "date": "2026-04-04",
+      "tags": [
+        "queues",
+        "idempotency",
+        "delivery"
+      ],
+      "readMin": 12,
+      "enabled": true
+    },
+    {
+      "slug": "16-audit-logs-hostile-insider-review",
+      "file": "16-audit-logs-hostile-insider-review.md",
+      "title": "Designing audit logs that survive a hostile insider review",
+      "kicker": "ESSAY",
+      "subtitle": "Append-only is not the same as tamper-evident, and your SRE knows where the log volume is mounted",
+      "date": "2026-04-12",
+      "tags": [
+        "security",
+        "audit",
+        "logs"
+      ],
+      "readMin": 11,
+      "enabled": true
+    },
+    {
+      "slug": "17-error-budget-math-correlated-dependencies",
+      "file": "17-error-budget-math-correlated-dependencies.md",
+      "title": "Error budget math when your SLO has correlated dependencies",
+      "kicker": "ESSAY",
+      "subtitle": "Multiplying availability numbers across services assumes failures are independent. They are not, and the gap is where your pager lives",
+      "date": "2026-04-24",
+      "tags": [
+        "slo",
+        "reliability",
+        "math"
+      ],
+      "readMin": 11,
+      "enabled": true
+    },
+    {
+      "slug": "18-cli-subcommand-hierarchies-twenty-verbs",
+      "file": "18-cli-subcommand-hierarchies-twenty-verbs.md",
+      "title": "Designing CLI subcommand hierarchies that scale past twenty verbs",
+      "kicker": "ESSAY",
+      "subtitle": "the awkward middle age of an internal tool, where --help becomes a wall of text and nobody remembers the flag order",
+      "date": "2026-05-08",
+      "tags": [
+        "cli",
+        "design",
+        "tooling"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "19-load-test-open-versus-closed-workload",
+      "file": "19-load-test-open-versus-closed-workload.md",
+      "title": "Why your load test lies: open versus closed workload models",
+      "kicker": "ESSAY",
+      "subtitle": "A 12ms p99 that turns into 340ms the moment you stop politely waiting",
+      "date": "2026-05-21",
+      "tags": [
+        "load-testing",
+        "performance"
+      ],
+      "readMin": 10,
+      "enabled": true
+    },
+    {
+      "slug": "20-paging-symptoms-versus-causes-oncall-load",
+      "file": "20-paging-symptoms-versus-causes-oncall-load.md",
+      "title": "Paging on symptoms versus causes without doubling oncall load",
+      "kicker": "ESSAY",
+      "subtitle": "The textbook says page on symptoms. The textbook has never carried your pager",
+      "date": "2026-06-02",
+      "tags": [
+        "oncall",
+        "alerting",
+        "sre"
+      ],
+      "readMin": 10,
+      "enabled": true
+    }
+  ]
+}

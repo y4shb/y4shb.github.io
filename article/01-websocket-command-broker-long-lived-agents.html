@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Designing a websocket command broker for long-lived agent connections - Yash Bhardwaj</title>
+<meta name="description" content="Why your fleet wants to phone home and stay on the line">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/01-websocket-command-broker-long-lived-agents.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Designing a websocket command broker for long-lived agent connections - Yash Bhardwaj">
+<meta property="og:description" content="Why your fleet wants to phone home and stay on the line">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/01-websocket-command-broker-long-lived-agents.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Designing a websocket command broker for long-lived agent connections - Yash Bhardwaj">
+<meta name="twitter:description" content="Why your fleet wants to phone home and stay on the line">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Designing a websocket command broker for long-lived agent connections","datePublished":"2025-11-04","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/01-websocket-command-broker-long-lived-agents.html"},"url":"https://y4shbhardwaj.com/article/01-websocket-command-broker-long-lived-agents.html","description":"Why your fleet wants to phone home and stay on the line","keywords":"websockets, fleet, agents"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">websockets</span><span class="chip">fleet</span><span class="chip">agents</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Nov 4, 2025</span></div></div><div id="content" data-prebaked="1"><h1>Designing a websocket command broker for long-lived agent connections</h1>
+<p><em>why your fleet wants to phone home and stay on the line</em></p>
+<p>A few thousand test rigs sit across half a dozen labs. Each rig is a bare-metal machine doing something noisy: burning in firmware, running regressions, scraping kernel logs. A controller, which we will call <code>fleetlink</code>, needs to push commands to any of them within a second or two. &quot;Reboot rig 0414.&quot; &quot;Pull the last 500 lines of dmesg.&quot; &quot;Start regression suite 7.&quot; Multiply by a thousand rigs and a busy human operator hammering the UI.</p>
+<p>The naive answer is HTTP polling. Every rig wakes up every N seconds, hits <code>GET /fleetlink/commands?rig=0414</code>, and runs whatever comes back. This works for about a week. Then the math catches up to you.</p>
+<h2>Why HTTP polling falls apart</h2>
+<p>The math is brutal. At a 5 second poll interval with 2000 rigs, you are eating 400 requests per second of pure overhead before anyone has actually done anything useful. Each request burns a TCP handshake (or at least a TLS resumption), a header round trip with cookies and auth tokens, and a database lookup to check whether a command exists for that rig.</p>
+<p>Latency is awful too. A command issued at t=0 lands on the rig somewhere between t=0 and t=5 seconds, averaging 2.5s. Cut the interval to 1 second and you have 2000 RPS of mostly-empty responses and an exhausted load balancer.</p>
+<p>You can fix latency with long-polling. Now every rig holds open a request for up to 30 seconds, the server parks it, and replies when a command shows up. Better latency, fewer requests, but you have invented websockets badly. You are paying for an HTTP request frame, a parked goroutine or thread, and a forced disconnect every 30 seconds, all to deliver a single command.</p>
+<p>Lined up side by side, the three options look like this for a 2000-rig fleet:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Transport</th>
+<th>Avg command latency</th>
+<th>Steady-state req/s</th>
+<th>Per-connection overhead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Polling (5s)</td>
+<td>~2.5s</td>
+<td>400</td>
+<td>TCP+TLS handshake + headers per poll</td>
+</tr>
+<tr>
+<td>Long-polling (30s park)</td>
+<td>~50ms when idle, request still recycled every 30s</td>
+<td>~67 + bursts on reconnect</td>
+<td>Parked goroutine/thread per rig, request frame every 30s</td>
+</tr>
+<tr>
+<td>WebSocket</td>
+<td>~5-20ms (network limited)</td>
+<td>0 in steady state</td>
+<td>One open socket per rig, ping/pong every 20s</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The websocket row makes overhead vanish in steady state, at the cost of every problem in the rest of this post.</p>
+<p>Commit to the persistent connection. Each rig opens one websocket to <code>fleetlink</code>, keeps it open for hours or days, and we push commands down it. The rest of this post is about everything that goes wrong when you actually try this.</p>
+<h2>The shape of the broker</h2>
+<p>Here is the rough topology.</p>
+<pre><code>   rig-0001 ─┐
+   rig-0002 ─┤     ┌──────────────┐     ┌──────────┐
+   rig-0003 ─┼─ws──┤ fleetlink-fe ├─────┤ fleetlink│
+     ...    ─┤     │   (broker)   │     │  control │
+   rig-2000 ─┘     └──────────────┘     └──────────┘
+                       │   ▲
+                       ▼   │
+                    ┌────────┐
+                    │  redis │  (pub/sub + connection registry)
+                    └────────┘</code></pre>
+<p><code>fleetlink-fe</code> is the broker. It is a stateless-ish process whose only job is to terminate websocket connections from rigs and shuffle messages between them and the control plane. We run several instances behind a TCP load balancer. The connection registry in Redis is just a hash: <code>rig_id -&gt; broker_instance_id</code>, so when control wants to talk to a specific rig it knows which broker to route through.</p>
+<p>The broker does almost no business logic. It speaks one protocol to rigs (websocket frames carrying JSON or msgpack), one protocol to control (gRPC, internal pubsub, whatever you like), and translates between them. Keep it boring.</p>
+<h2>Connection lifecycle</h2>
+<p>A new rig boots, reads its config, and dials <code>wss://fleetlink.example.internal/agent</code>. On connect, it sends a <code>HELLO</code> frame:</p>
+<pre><code class="hljs language-json">{ &quot;type&quot;: &quot;hello&quot;, &quot;rig_id&quot;: &quot;rig-0414&quot;, &quot;version&quot;: &quot;agent-2.7.3&quot;, &quot;boot_id&quot;: &quot;b7a1...e9&quot; }</code></pre>
+<p>The <code>boot_id</code> is a fresh UUID per process start. This matters later for reconnects. The broker validates the rig&#39;s mTLS cert, looks up its identity, and either accepts with a <code>WELCOME</code> or closes with a reason code.</p>
+<p>On <code>WELCOME</code>, the broker writes <code>rig-0414 -&gt; broker-fe-03</code> into Redis with a short TTL (say 60 seconds) and starts refreshing it. Now the control plane can find rig 0414.</p>
+<p>The unhappy branches are worth pinning down here so the later sections have something to refer back to:</p>
+<ul>
+<li><strong>Malformed <code>HELLO</code></strong> (missing fields, bad JSON, unknown protocol version): close with code 4400, log the cert subject, no Redis write. Do not attempt a partial registration.</li>
+<li><strong><code>rig_id</code> collides with an active healthy connection</strong> (current entry&#39;s <code>boot_id</code> matches and the owning broker is still pinging): close the new connection with code 4409 and let the rig retry after backoff. This protects against a rig that has cloned its config to a second machine.</li>
+<li><strong><code>rig_id</code> collides with a stale entry</strong> (different <code>boot_id</code>, or owner has not refreshed): take ownership via the Lua script later in the post. This is the normal reconnect path.</li>
+</ul>
+<p>Two things make the rest of this lifecycle harder than it looks: the connection can die without telling anyone, and the rig can reconnect to a different broker instance before the old entry has expired. We will deal with both.</p>
+<h2>Ping, pong, and the half-open socket</h2>
+<p>Half-open TCP (the rig vanishes but the broker&#39;s socket stays in <code>ESTABLISHED</code>) is the failure mode that bites everyone exactly once. The general diagnosis of dead tunnels gets its own post later in the series; here I&#39;ll focus on the websocket-frame piece.</p>
+<p>Websocket has dedicated <code>PING</code> (opcode 0x9) and <code>PONG</code> (opcode 0xA) control frames defined in RFC 6455 sections 5.5.2 and 5.5.3 (<a href="https://www.rfc-editor.org/rfc/rfc6455.html">https://www.rfc-editor.org/rfc/rfc6455.html</a>), payload capped at 125 bytes. The broker sends a <code>PING</code> every 20 seconds and expects a <code>PONG</code> within 10. Three misses and the connection is forcibly closed.</p>
+<pre><code class="hljs language-python">async def keepalive(conn):
+    while True:
+        await asyncio.sleep(20)
+        pong_ok = False
+        try:
+            pong_waiter = await conn.ping()
+            await asyncio.wait_for(pong_waiter, timeout=10)
+            pong_ok = True
+        except (asyncio.TimeoutError, websockets.ConnectionClosed, OSError):
+            # Treat any ping failure as a missed pong. A ConnectionClosed
+            # here means the socket is already gone, which is exactly the
+            # state the miss counter is meant to detect.
+            pass
+
+        if pong_ok:
+            conn.missed_pings = 0
+        else:
+            conn.missed_pings += 1
+            if conn.missed_pings &gt;= 3:
+                await conn.close(code=4002, reason=&quot;ping timeout&quot;)
+                return</code></pre>
+<p><code>conn.ping()</code> returns a future that resolves when the matching <code>PONG</code> arrives; <code>wait_for</code> raises <code>TimeoutError</code> on silence. I&#39;m being explicit with <code>pong_ok</code> instead of relying on <code>try/except/else</code> so the success path is obvious at a glance.</p>
+<p>Do not rely on the rig pinging the broker. Some flaky NAT in front of the rig may happily forward outgoing PINGs while dropping incoming traffic. The broker pings, the rig must pong, and silence is treated as death.</p>
+<h2>Proxy idle timeouts (the broker owns this number)</h2>
+<p>If you put anything between rigs and the broker (load balancer, reverse proxy, cloud LB), you inherit its idle timeout, and that number drives every other liveness decision in your stack. The defaults worth memorizing:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Proxy</th>
+<th>Default idle</th>
+<th>Tunable?</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AWS NLB (TCP listener)</td>
+<td>350s</td>
+<td>Yes, 60-6000s since Sept 2024</td>
+<td><a href="https://aws.amazon.com/blogs/networking-and-content-delivery/introducing-nlb-tcp-configurable-idle-timeout/">NLB configurable idle timeout</a></td>
+</tr>
+<tr>
+<td>AWS NLB (TLS listener)</td>
+<td>350s</td>
+<td>No, fixed</td>
+<td>same</td>
+</tr>
+<tr>
+<td>AWS ALB</td>
+<td>60s</td>
+<td>Yes, 1-4000s</td>
+<td><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-load-balancer-attributes.html">ALB attributes docs</a></td>
+</tr>
+<tr>
+<td>nginx <code>proxy_read_timeout</code></td>
+<td>60s</td>
+<td>Yes, per-directive (inter-read, not total)</td>
+<td><a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html">nginx proxy module</a></td>
+</tr>
+<tr>
+<td>Azure Front Door (websocket)</td>
+<td>300s, plus 4h max connection lifetime</td>
+<td>No</td>
+<td><a href="https://learn.microsoft.com/en-us/azure/frontdoor/standard-premium/websocket">Front Door websocket docs</a></td>
+</tr>
+<tr>
+<td>Cloudflare Free/Pro (websocket)</td>
+<td>100s</td>
+<td>Enterprise only</td>
+<td><a href="https://developers.cloudflare.com/network/websockets/">Cloudflare websockets docs</a></td>
+</tr>
+<tr>
+<td>Most corporate squid/forward proxies</td>
+<td>60s, sometimes 30s</td>
+<td>Depends on the team that owns it</td>
+<td>local config</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Two AWS quirks worth knowing. ALB resets idle on the last byte in either direction, so a broker ping is enough to keep the whole connection alive. NLB&#39;s cross-zone setting does not change the timeout but does change whether your keepalive traffic shows up as cross-AZ on the bill.</p>
+<p>If your ping interval is longer than the smallest idle timeout on the path, connections die in lockstep every minute or so, and you will spend three days wondering why. The rule: ping interval strictly less than the tightest proxy idle on the path, with comfortable margin. 20s pings comfortably survive a 60s proxy. Verify by actually tracing one connection through every hop and asking each ops team what their timeouts are. Do not trust documentation; read the running config.</p>
+<p>(One related nginx footgun while we are here: nginx caps a single request-header field at one <code>large_client_header_buffer</code>, default 8 KB, with up to 4 such buffers, see nginx.org/en/docs/http/ngx_http_core_module.html#large_client_header_buffers. <code>client_header_buffer_size</code> defaults to 1 KB and applies to the initial read. If your <code>HELLO</code> upgrade request carries a fat JWT, you will hit one of these before you ever reach the websocket handler.)</p>
+<p>(Other posts in this series will mention proxy idle behavior in passing; the numbers above are the canonical reference.)</p>
+<h2>Ordered command delivery</h2>
+<p>Once a connection is up, what does it carry? Commands from control, plus responses and unsolicited events from the rig. Two design choices have outsized impact: ordering and acknowledgement.</p>
+<p>For a single rig, commands should be delivered in the order control issued them. If an operator clicks &quot;stop regression&quot; then &quot;reboot&quot;, you really do not want those reversed.</p>
+<p>The simplest way to get this is to give each rig a single per-connection outbound queue, and one writer goroutine that drains it. No fan-out, no parallel sends. Within one connection, websocket is ordered (it is TCP), so as long as the broker writes in order, the rig receives in order.</p>
+<pre><code class="hljs language-go">type RigConn struct {
+    id      string
+    outbox  chan Command   // buffered, e.g. 128 deep
+    ws      *websocket.Conn
+}
+
+// Called by the control plane when it issues a command. The seq is
+// assigned here, NOT in the writer, so retries and replays preserve
+// the original number.
+func (r *RigConn) Enqueue(cmd Command) error {
+    cmd.SeqNo = r.nextSeq()
+    select {
+    case r.outbox &lt;- cmd:
+        return nil
+    default:
+        return ErrOutboxFull
+    }
+}
+
+func (r *RigConn) writer(ctx context.Context) {
+    for {
+        select {
+        case &lt;-ctx.Done():
+            return
+        case cmd := &lt;-r.outbox:
+            if err := r.ws.WriteJSON(cmd); err != nil {
+                r.fail(err)
+                return
+            }
+        }
+    }
+}</code></pre>
+<p>Each command gets a monotonic <code>seq_no</code> at enqueue time. The rig sends back an <code>ACK</code> with that seq when it has accepted (not necessarily completed) the command. The seq is a per-(rig, current connection attempt) routing token, not a log-stream offset; replay across reconnects is its own design problem and I cover it in a later post.</p>
+<h2>Backpressure when one rig stalls</h2>
+<p>Here is the subtle one. A rig stops reading. Maybe its agent is wedged in a syscall, maybe a disk is full and logging is blocking, maybe someone is single-stepping it in gdb. Its TCP receive window fills up. The broker&#39;s <code>WriteJSON</code> call blocks. If your writer goroutine is shared, every other rig grinds to a halt. If you have one writer per rig (as above), only this rig is stuck, but the outbox channel fills up, and now control attempts to enqueue commands and blocks too.</p>
+<p>You have a few choices. None of them are perfect.</p>
+<ol>
+<li><strong>Bounded outbox, drop oldest.</strong> When the outbox is full, drop the oldest queued command. Cheap, but you silently lose commands.</li>
+<li><strong>Bounded outbox, drop newest with error.</strong> New enqueue returns an error to control. Control surfaces the failure to the operator. Annoying but honest.</li>
+<li><strong>Bounded outbox, kill the connection.</strong> If the outbox fills, declare the rig dead, close the socket, let it reconnect. Brutal but predictable.</li>
+</ol>
+<p>For an interactive operator UI, option 2 is usually right: tell the human the rig is unresponsive, let them decide. The shape of that &quot;honest error&quot; in the operator UI is what makes the choice concrete. Control surfaces it as the response to the enqueue RPC, and the UI renders it next to the rig row:</p>
+<pre><code class="hljs language-json">{
+  &quot;error&quot;: &quot;rig_unresponsive&quot;,
+  &quot;rig_id&quot;: &quot;rig-0414&quot;,
+  &quot;detail&quot;: &quot;outbox full (128/128), oldest queued cmd age 47s&quot;,
+  &quot;last_ack_seq&quot;: 8421,
+  &quot;last_ack_at&quot;: &quot;2026-04-12T14:03:11Z&quot;,
+  &quot;suggested_action&quot;: &quot;force_reconnect&quot;
+}</code></pre>
+<p>The operator sees &quot;rig-0414: unresponsive, last ack 47s ago, [Force reconnect]&quot; and the button is just option 3 wrapped in human consent. Automated control loops with idempotent commands skip the human and go straight to option 3.</p>
+<p>The bug to avoid: an unbounded outbox. Don&#39;t. Memory growth on a stuck rig in a fleet of thousands turns into an OOM in the broker, and now every connection drops at once. Which brings us to the next horror.</p>
+<h2>Reconnect storms</h2>
+<p>The broker dies. Or restarts for a deploy. Or the LB shuffles connections. Two thousand rigs all notice within a second and reconnect simultaneously. If your broker startup involves any per-connection work that touches a shared resource (a database, a registry, an auth service), you will overload it instantly.</p>
+<p>Mitigations, roughly in order of importance.</p>
+<p><strong>Jittered reconnect on the rig side.</strong> This is the change with the biggest payoff. The math:</p>
+<pre><code class="hljs language-python">def reconnect_delay(attempt):
+    base = min(2 ** attempt, 30)        # cap at 30s
+    return random.uniform(0.5, 1.5) * base</code></pre>
+<p>A few things worth noting about that formula:</p>
+<ul>
+<li>Spelled out: <code>attempt=0</code> → base 1s, <code>attempt=1</code> → 2s, <code>attempt=2</code> → 4s, <code>attempt=3</code> → 8s, <code>attempt=4</code> → 16s, <code>attempt=5</code> → 32s capped at 30s, then 30s forever. Capping prevents the rig from waiting an hour after the broker has been back up for fifty minutes.</li>
+<li><code>random.uniform(0.5, 1.5) * base</code> is &quot;full jitter centered on the base&quot;, which I prefer over the half-jitter variant (<code>base/2 + random*base/2</code>). It smears the reconnect window symmetrically and is easy to reason about.</li>
+<li>The first attempt (<code>attempt = 0</code>) gives a delay between 0.5 and 1.5 seconds. Some teams want <code>attempt = 0</code> to mean &quot;try immediately&quot;; resist that urge during a reconnect storm, because it means a thousand rigs all retry at once before any backoff has kicked in.</li>
+</ul>
+<p>Without jitter, every rig that disconnected at the same instant reconnects at the same instant. With jitter, they smear across a window. If you remember one thing from this whole post, remember the <code>random.uniform</code>.</p>
+<p><strong>Connection-rate limiting at the broker.</strong> Accept new connections at a bounded rate per broker instance. Excess connections get a <code>503</code> or websocket close with a backoff hint, and the rig waits longer. This is uncomfortable to design (you are intentionally rejecting clients) but it protects the broker from death-spiraling. A token-bucket on the Accept loop is enough:</p>
+<pre><code class="hljs language-go">// 50 new conns/sec, burst 100.
+var acceptBucket = rate.NewLimiter(rate.Limit(50), 100)
+
+func acceptLoop(ln net.Listener) {
+    for {
+        raw, err := ln.Accept()
+        if err != nil { return }
+
+        if !acceptBucket.Allow() {
+            // WebSocket close code 4503 is app-defined; the rig agent
+            // reads the reason for a Retry-After-style hint in seconds.
+            backoff := 5 + rand.Intn(10) // 5-15s, jittered
+            rejectWithCloseFrame(raw, 4503, fmt.Sprintf(&quot;retry_after=%d&quot;, backoff))
+            continue
+        }
+
+        go handleConn(raw)
+    }
+}</code></pre>
+<p>Close codes 4000-4999 are the private-use range, so 4503 mirrors HTTP 503 semantics without conflicting with reserved codes. The reason field is plain UTF-8 (max 123 bytes after the 2-byte code), enough for a <code>retry_after=&lt;seconds&gt;</code> hint the rig parses before its next attempt.</p>
+<p><strong>Stateless authentication.</strong> If you authenticate by hitting an auth service per connection, that service will fall over during a reconnect storm. Use JWTs or pre-shared mTLS certs that the broker can validate locally with a cached CA bundle. Hit the auth service only for revocation checks, asynchronously, and tolerate the lag.</p>
+<p><strong>Warmup the broker before the LB sends traffic.</strong> When a broker starts, give it 5 seconds before it advertises itself as healthy. This lets caches populate and prevents the LB from shoving 500 reconnects at a cold process.</p>
+<h2>Reconnects that race with their own ghost</h2>
+<p>A rig drops, reconnects in 1.2 seconds to a different broker instance. The Redis entry <code>rig-0414 -&gt; broker_fe_03</code> from the previous connection still exists with TTL 58s. The new broker <code>broker_fe_07</code> writes <code>rig-0414 -&gt; broker_fe_07</code> and starts refreshing. So far so good.</p>
+<p>Now control wants to talk to rig 0414. It reads Redis. Whichever broker wrote last wins. But <code>broker_fe_03</code> is still alive and still firing its own refresh timer because it hasn&#39;t yet noticed its socket is dead, and if its refresh lands after <code>broker_fe_07</code>&#39;s write, control routes to a broker holding a corpse.</p>
+<p>The fix is a single Lua script that makes every write conditional on the <code>boot_id</code>. Store the registry value as the tuple <code>(boot_id, broker_id)</code>, with <code>boot_id</code> written as the canonical 36-char hyphenated hex form so Redis lexical compare matches UUIDv7 time order (pass raw 16-byte binary and the compare goes sideways). Then:</p>
+<pre><code class="hljs language-lua">-- KEYS[1] = &quot;rig:0414&quot;
+-- ARGV[1] = my_boot_id
+-- ARGV[2] = my_broker_id
+-- ARGV[3] = ttl_seconds
+-- ARGV[4] = &quot;hello&quot; or &quot;refresh&quot;
+local existing = redis.call(&quot;GET&quot;, KEYS[1])
+local new_val  = ARGV[1] .. &quot;|&quot; .. ARGV[2]
+
+if existing == false then
+  redis.call(&quot;SET&quot;, KEYS[1], new_val, &quot;EX&quot;, ARGV[3])
+  return &quot;ok&quot;
+end
+
+local cur_boot, cur_broker = string.match(existing, &quot;([^|]+)|([^|]+)&quot;)
+
+if ARGV[4] == &quot;hello&quot; then
+  -- New HELLO always wins if its boot_id is strictly newer.
+  -- boot_ids are time-ordered UUIDv7s, so lexical compare is fine.
+  if ARGV[1] &gt; cur_boot then
+    redis.call(&quot;SET&quot;, KEYS[1], new_val, &quot;EX&quot;, ARGV[3])
+    return &quot;ok&quot;
+  end
+  return &quot;stale_hello&quot;
+end
+
+-- &quot;refresh&quot; path: only the writer that owns the tuple may extend it.
+if cur_boot == ARGV[1] and cur_broker == ARGV[2] then
+  redis.call(&quot;EXPIRE&quot;, KEYS[1], ARGV[3])
+  return &quot;ok&quot;
+end
+return &quot;superseded&quot;</code></pre>
+<p>Walking through the race as a timeline:</p>
+<pre class="mermaid">sequenceDiagram
+    participant rig as rig-0414
+    participant fe03 as broker_fe_03
+    participant redis as redis
+    participant fe07 as broker_fe_07
+
+    Note over rig,fe07: t=0  boot B1, connect
+    rig-&gt;&gt;fe03: HELLO(B1)
+    fe03-&gt;&gt;redis: SET (B1, fe_03)
+    Note over redis: state = (B1, fe_03)
+
+    Note over rig,fe07: t=10  refresh tick
+    fe03-&gt;&gt;redis: refresh(B1, fe_03)
+    redis--&gt;&gt;fe03: ok
+
+    Note over rig,fe03: t=12  socket drops (fe_03 has not noticed)
+
+    Note over rig,fe07: t=13.2  rig boots B2, lands on fe_07
+    rig-&gt;&gt;fe07: HELLO(B2)
+    fe07-&gt;&gt;redis: SET (B2, fe_07)
+    Note over redis: state = (B2, fe_07)
+
+    Note over rig,fe07: t=14  ghost refresh from fe_03
+    fe03-&gt;&gt;redis: refresh(B1, fe_03)
+    redis--&gt;&gt;fe03: superseded
+    Note over fe03: tear down ghost socket
+
+    Note over rig,fe07: t=20  legitimate refresh
+    fe07-&gt;&gt;redis: refresh(B2, fe_07)
+    redis--&gt;&gt;fe07: ok</pre>
+<p>The key step is t=14. Without the Lua check, <code>broker_fe_03</code>&#39;s refresh would blindly <code>SET</code> the registry back to <code>(B1, fe_03)</code> and control would route commands to a broker holding a corpse for up to one TTL. With the check, the script reads the current tuple, sees the mismatch, returns <code>superseded</code>, and the old broker tears down its dead socket.</p>
+<p>Two brokers can never both think they own a rig past the next refresh tick, which is the actual guarantee you need. UUIDv7 makes the <code>boot_id</code> compare safe: it puts a 48-bit Unix-ms timestamp in the high bits (RFC 9562), so byte-wise compare orders IDs by creation time across milliseconds. Intra-ms ordering depends on the generator method in section 6.2, which does not matter here because two reconnects in the same millisecond do not happen in practice.</p>
+<h2>Things I have not covered but you will hit</h2>
+<p>A short list, because this post is already long enough.</p>
+<ul>
+<li><strong>Message size limits.</strong> Some clients send 10MB log dumps over the command channel. Don&#39;t let them. Separate channel, separate limits, or a presigned-URL upload to object storage with just a notification over the websocket.</li>
+<li><strong>Per-rig fairness.</strong> One chatty rig can monopolize a broker&#39;s CPU. Token-bucket per connection.</li>
+<li><strong>Observability.</strong> Metrics per connection are expensive at 2000 connections. Aggregate by rig group, not per rig, and sample slow paths.</li>
+<li><strong>Graceful broker shutdown.</strong> Send a <code>GOAWAY</code> frame, give rigs 10 seconds to reconnect elsewhere, then close. This avoids the entire fleet noticing at the same millisecond.</li>
+<li><strong>Schema evolution.</strong> Your protocol will change. Version every message. Tolerate unknown fields. Refuse unknown message types loudly during development, silently in production.</li>
+</ul>
+<p>The pattern underneath all of this is the same. A persistent connection is a stateful object pretending to be a transport. Treat liveness, ordering, backpressure, and identity across reconnects as design decisions, not surprises. Write them down.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

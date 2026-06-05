@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cancellation and cleanup in long-running task workers - Yash Bhardwaj</title>
+<meta name="description" content="where workers leak leases, half-write files, and lose jobs between SIGTERM and exit">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/10-cancellation-and-cleanup-in-long-running-workers.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Cancellation and cleanup in long-running task workers - Yash Bhardwaj">
+<meta property="og:description" content="where workers leak leases, half-write files, and lose jobs between SIGTERM and exit">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/10-cancellation-and-cleanup-in-long-running-workers.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Cancellation and cleanup in long-running task workers - Yash Bhardwaj">
+<meta name="twitter:description" content="where workers leak leases, half-write files, and lose jobs between SIGTERM and exit">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Cancellation and cleanup in long-running task workers","datePublished":"2026-01-28","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/10-cancellation-and-cleanup-in-long-running-workers.html"},"url":"https://y4shbhardwaj.com/article/10-cancellation-and-cleanup-in-long-running-workers.html","description":"where workers leak leases, half-write files, and lose jobs between SIGTERM and exit","keywords":"workers, shutdown, signals"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">workers</span><span class="chip">shutdown</span><span class="chip">signals</span></div></div><div class="meta-bottom"><span class="meta-read">11 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Jan 28, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Cancellation and cleanup in long-running task workers</h1>
+<p><em>where workers leak leases, half-write files, and lose jobs between SIGTERM and exit</em></p>
+<p>SIGTERM is a request; SIGKILL is not. Most worker bugs live in the gap. The OS will reap your file descriptors and memory pages on the way out, but it will not roll back the row you wrote, release the lease you claimed, or tell the queue that the half-finished job is up for grabs. Shutdown is the most under-tested path in any worker fleet, and the failures are particularly hard to debug: orphaned locks, half-written files, transactions that hang until a DBA notices, and customer-visible jobs that vanish with no log line saying why.</p>
+<p>This post is about doing it properly. I am going to use a generic Python worker that pulls jobs from a queue (think Redis, RabbitMQ, SQS, doesn&#39;t matter), runs them, and writes results somewhere. The patterns translate cleanly to Go, Rust, Node, whatever you use.</p>
+<h2>What &quot;graceful&quot; actually means</h2>
+<p>When the orchestrator wants your worker gone, it sends SIGTERM. Some time later it sends SIGKILL, and the exact gap depends on what is running you:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Orchestrator</th>
+<th>Default grace period</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kubernetes</td>
+<td>30s</td>
+<td><code>terminationGracePeriodSeconds</code> on the pod spec (<a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/">k8s docs</a>)</td>
+</tr>
+<tr>
+<td>systemd</td>
+<td>90s</td>
+<td><code>DefaultTimeoutStopSec=90s</code> in <code>system.conf</code>, overridable per unit (<a href="https://www.man7.org/linux/man-pages/man5/systemd-system.conf.5.html">systemd docs</a>)</td>
+</tr>
+<tr>
+<td>Docker (Linux)</td>
+<td>10s</td>
+<td>client default for <code>docker stop -t</code>; overridable per call or via container <code>--stop-timeout</code> at create time (<a href="https://docs.docker.com/reference/cli/docker/container/stop/">docker docs</a>)</td>
+</tr>
+<tr>
+<td>AWS ECS</td>
+<td>30s</td>
+<td><code>stopTimeout</code>, max 120s on Fargate platform 1.3+ (<a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">ECS docs</a>)</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>SIGKILL is not catchable. Your process is gone the instant it arrives. Anything the OS does not automatically clean up on process death is now your problem and will stay your problem until a human notices.</p>
+<p>So graceful reduces to one question: can you reach a clean state before SIGKILL?</p>
+<p>A clean state means:</p>
+<ol>
+<li>No in-flight job is half-done. Either it finished, or it was returned to the queue so another worker can pick it up.</li>
+<li>Every external resource you reserved (DB rows marked locked, file locks, device leases, leased compute slots) is released.</li>
+<li>Every buffered write is flushed. No half-written result files, no log lines lost.</li>
+<li>The next SIGTERM after a normal startup behaves identically. No special &quot;we just restarted&quot; branch.</li>
+</ol>
+<p>The bad pattern, which I see constantly, is to install a signal handler that sets a flag and then to forget about it for most of the codebase. The main loop checks the flag between jobs. Great. But a job that takes 4 minutes ignores the flag for 4 minutes and then your termination grace period expires.</p>
+<h2>Cooperative cancellation is a contract</h2>
+<p>Cancellation is not something you bolt on. It is a contract between the worker framework and every function it calls. The contract has two clauses:</p>
+<ol>
+<li>Long-running code checks for cancellation at regular intervals.</li>
+<li>When cancellation is signaled, code stops at the next checkpoint and unwinds cleanly via normal exception handling.</li>
+</ol>
+<p>Python does not have built-in cancellation tokens for synchronous code, so we build one. The simplest useful version:</p>
+<pre><code class="hljs language-python">import signal
+import threading
+
+class ShutdownToken:
+    def __init__(self):
+        self._event = threading.Event()
+
+    def request(self):
+        self._event.set()
+
+    def is_requested(self) -&gt; bool:
+        return self._event.is_set()
+
+    def wait(self, timeout: float) -&gt; bool:
+        # Returns True if shutdown was requested during the wait.
+        return self._event.wait(timeout)
+
+    def raise_if_requested(self):
+        if self._event.is_set():
+            raise ShutdownRequested()
+
+class ShutdownRequested(Exception):
+    pass</code></pre>
+<p>Wire it up to signals exactly once, at process startup:</p>
+<pre><code class="hljs language-python">shutdown = ShutdownToken()
+
+def _handle_signal(signum, frame):
+    shutdown.request()
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)</code></pre>
+<p>Two things to notice. First, the handler does almost nothing. It sets an event and returns. Do not log from a signal handler. Do not acquire locks. Do not call non-async-signal-safe functions. People get this wrong in C all the time and it bites less often in Python but still bites.</p>
+<p>Second, <code>wait()</code> exists for a reason. Anywhere you would have called <code>time.sleep(30)</code>, call <code>shutdown.wait(30)</code> instead. If shutdown comes during the sleep, you wake up immediately.</p>
+<p>There is a Python-specific trap worth naming. Per the <a href="https://docs.python.org/3/library/signal.html">signal module docs</a>, handlers run only on the main thread of the main interpreter, regardless of which thread the signal arrived on. If your main thread is blocked inside a C extension that holds the GIL (sqlite under some configurations, certain image and ML libraries, blocking syscalls in poorly behaved bindings), the handler is queued until the call returns and the GIL is released. Worth knowing alongside this: <a href="https://peps.python.org/pep-0475/">PEP 475</a>, shipped in Python 3.5, makes stdlib syscall wrappers automatically retry on EINTR after running the Python signal handler, so a SIGTERM no longer pops your blocking <code>read()</code> or <code>select()</code> out with an exception by default. If you want the old behavior, the handler itself has to raise, or you can use <code>signal.set_wakeup_fd</code> to integrate signal delivery with a selector or asyncio loop. The structural fix is the same either way: keep the main thread doing only short-lived Python work, like the fetch-and-dispatch loop, and let actual job execution happen on worker threads or in subprocesses. The main thread stays responsive, signals get processed promptly, and the workers can be as heavy as they need to be.</p>
+<h2>Pushing cancellation down the call stack</h2>
+<p>The token does nothing useful if it never reaches the code that needs it. Pass it explicitly. Resist the urge to make it a global singleton accessible from anywhere, because that makes test code awful.</p>
+<p>All subprocess and signal patterns below assume POSIX; Windows needs a different cleanup strategy (<code>terminate()</code> there maps to <code>TerminateProcess</code>, which is an immediate kill with no SIGTERM-equivalent, and <code>os.killpg</code> does not exist).</p>
+<pre><code class="hljs language-python">def run_job(job, shutdown: ShutdownToken):
+    for step in job.steps:
+        shutdown.raise_if_requested()
+        execute_step(step, shutdown)
+
+def execute_step(step, shutdown: ShutdownToken):
+    proc = subprocess.Popen(step.cmd, ...)
+    while proc.poll() is None:
+        if shutdown.wait(0.5):
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise ShutdownRequested()</code></pre>
+<p>The subprocess case is interesting. You spawned a child. The orchestrator only sent SIGTERM to you, not to the child. If you exit without dealing with the child, it either becomes an orphan adopted by PID 1 (which may or may not reap it cleanly) or it sticks around eating CPU. Always propagate cancellation to children, give them a short grace period, then kill.</p>
+<p>The footgun hiding inside that advice is process groups. <code>proc.terminate()</code> sends SIGTERM to the immediate child only. If the child shelled out to ffmpeg, or kicked off a training script that itself forks a worker pool, those grandchildren do not get the signal and you end up with orphaned ffmpeg processes burning CPU long after your worker exited. The fix is to put the child in its own process group and signal the group:</p>
+<pre><code class="hljs language-python">proc = subprocess.Popen(step.cmd, start_new_session=True)  # new pgid
+...
+os.killpg(proc.pid, signal.SIGTERM)
+try:
+    proc.wait(timeout=5)
+except subprocess.TimeoutExpired:
+    os.killpg(proc.pid, signal.SIGKILL)</code></pre>
+<p><code>start_new_session=True</code> calls <code>setsid()</code> in the child, which makes its PID the new process group ID. <code>os.killpg</code> then delivers the signal to every process in that group, ffmpeg grandchildren included.</p>
+<h2>Draining in-flight work</h2>
+<p>The main loop usually looks something like this:</p>
+<pre><code class="hljs language-python">def main_loop(queue, shutdown: ShutdownToken):
+    while not shutdown.is_requested():
+        job = queue.fetch(timeout=5.0)
+        if job is None:
+            continue
+        try:
+            run_job(job, shutdown)
+            queue.ack(job)
+        except ShutdownRequested:
+            queue.nack(job, requeue=True)
+            break
+        except Exception:
+            log.exception(&quot;job failed&quot;)
+            queue.nack(job, requeue=False)</code></pre>
+<p>A few subtleties.</p>
+<p><code>queue.fetch</code> should have a timeout. If it blocks indefinitely, your shutdown check at the top of the loop never runs and you sit there until SIGKILL. Five seconds is fine. Most brokers handle short-poll loops cheaply.</p>
+<p><code>nack(job, requeue=True)</code> is the load-bearing line. The job was partially executed and we cannot guarantee it finished. Putting it back on the queue means another worker will pick it up. This assumes jobs are idempotent, which the post on idempotency keys covers in detail; for the rest of this post I am going to treat that as a precondition.</p>
+<p>If you have a pool of worker threads pulling concurrently, the shutdown sequence fans out:</p>
+<pre class="mermaid">sequenceDiagram
+    participant O as Orchestrator
+    participant M as Main loop
+    participant P as Worker pool
+    participant E as External resources
+    O-&gt;&gt;M: SIGTERM
+    M-&gt;&gt;M: close fetch path
+    M-&gt;&gt;P: set ShutdownToken
+    P-&gt;&gt;P: hit next checkpoint
+    P-&gt;&gt;E: release leases, rollback txns, kill subprocs
+    P--&gt;&gt;M: workers exit
+    M-&gt;&gt;M: wait up to N seconds
+    M-&gt;&gt;M: log &quot;leaking&quot; for any still running
+    M-&gt;&gt;O: exit 0</pre>
+<p>The &quot;log leaking with job id&quot; line is your gift to future-you. When the morning report says job 7c2f-A19 has been running for 42 minutes, you want to be able to grep your logs and find the message that says &quot;worker shutting down while job 7c2f-A19 still in flight.&quot;</p>
+<h2>Releasing external resources</h2>
+<p>This is the part people forget. The job acquired things outside the process. Those things will outlive you unless you explicitly release them.</p>
+<p>Common offenders:</p>
+<ul>
+<li>A row in a <code>device_leases</code> table marked <code>claimed_by = &#39;worker-17&#39;, claimed_at = &lt;timestamp&gt;</code>. If you die, the row stays claimed forever, or until some janitor process notices the worker is gone.</li>
+<li>An advisory file lock (<code>fcntl.flock</code>). The kernel releases this when your process exits, so this one is usually fine. But if you wrote your own lock file in <code>/var/run/something.lock</code> containing your PID, that file stays.</li>
+<li>A long-running database transaction holding row locks. The DB will roll it back when your connection closes, which happens on process exit if your driver is well-behaved. With a connection pooler in front (PgBouncer in transaction or statement mode, or any app-level pool that recycles rather than closes on process exit), the server-side connection can outlive your process, and the transaction along with it, until the pool&#39;s own idle or recycle policy reclaims the socket.</li>
+<li>A reserved compute slot in some scheduler (&quot;worker-17 has 2 GPUs reserved&quot;).</li>
+<li>Files in a temp directory you created but never cleaned up.</li>
+</ul>
+<p>The pattern I use is a context manager per resource, and a stack of them per job:</p>
+<pre><code class="hljs language-python">from contextlib import ExitStack
+
+def run_job(job, shutdown: ShutdownToken):
+    with ExitStack() as stack:
+        device = stack.enter_context(lease_device(job.device_kind))
+        workdir = stack.enter_context(temporary_workdir(job.id))
+        txn = stack.enter_context(db.transaction())
+
+        for step in job.steps:
+            shutdown.raise_if_requested()
+            execute_step(step, device, workdir, shutdown)
+
+        txn.commit()</code></pre>
+<p>When <code>ShutdownRequested</code> propagates out of the <code>with</code>, the <code>ExitStack</code> runs the cleanup hooks in reverse order. The transaction rolls back, the workdir gets removed, the device lease gets released. All without writing a single <code>try/finally</code> block in the job code.</p>
+<p>The lease release itself needs to be defensive. Something like:</p>
+<pre><code class="hljs language-python">@contextmanager
+def lease_device(kind: str):
+    device_id = inventory.claim(kind, claimed_by=worker_id())
+    try:
+        yield device_id
+    finally:
+        try:
+            inventory.release(device_id, claimed_by=worker_id())
+        except Exception:
+            log.exception(&quot;failed to release device %s&quot;, device_id)</code></pre>
+<p>Note the <code>claimed_by=worker_id()</code> on release. It is a conditional release: only release if I am still the claimer. This prevents a nasty bug where a slow shutdown overlaps with the inventory janitor reclaiming your lease, which then gets reassigned to another worker, which you then accidentally release out from under.</p>
+<h2>When the cancellation token never gets read</h2>
+<p>Everything above assumes the process is alive long enough to honor SIGTERM. Sometimes it is not. OOM kill, kernel panic, power loss, a runaway <code>kill -9</code> from a panicked operator. In those cases the cancellation token is irrelevant: your handler never ran, your <code>ExitStack</code> never unwound, your leases are sitting in the database with your name on them and no one to release them.</p>
+<p>This is where the broader stale-resource reclaim machinery takes over, not as the primary cleanup path but as the last line of defense. The post on heartbeats and stale-worker reclaim covers the general pattern (<code>reap_stale_workers</code> using heartbeat age), and the right move here is to lean on it rather than reimplement it inside the worker. On startup, a worker should consult that same reclaim mechanism for any leases tagged with its own host or identity, and only then begin accepting jobs.</p>
+<p>There is one race worth calling out, because it bit us before we wrote it down. The reclaim sweep only fires on leases older than a stale threshold (say, 60 seconds). If the previous incarnation died 5 seconds ago, its leases still look fresh. The new worker boots, sees nothing to reclaim, and might try to claim a device that is still marked owned by the dead process. You have two reasonable options. Either the new worker waits for the reclaim sweep to catch up before accepting work, or it refuses to claim any resource whose holder matches its own host identity until the prior holder&#39;s leases time out. Pick one and document it. Silent assumptions here become 3am pages.</p>
+<p>Option B, in code, looks roughly like this:</p>
+<pre><code class="hljs language-python">def claim_device(kind: str, me: str) -&gt; str:
+    # Refuse to grab a device still tagged with our own host identity
+    # until the prior lease ages past the stale threshold.
+    held_by_us = inventory.list_claims(kind, claimed_by_host=host_of(me))
+    if held_by_us:
+        oldest = min(c.claimed_at for c in held_by_us)
+        age = now() - oldest
+        if age &lt; STALE_THRESHOLD:
+            raise StartupBackoff(
+                f&quot;prior holder on this host still within grace; retry in {STALE_THRESHOLD - age}s&quot;
+            )
+    return inventory.claim(kind, claimed_by=me)</code></pre>
+<p>The startup supervisor catches <code>StartupBackoff</code>, sleeps, and retries. By the time the wait clears, either the reclaim sweep has run or the previous lease has aged out and you can <code>inventory.claim</code> it directly.</p>
+<h2>Testing the abort path</h2>
+<p>The abort path is annoying to exercise, which is why most teams skip it. The interesting move is not the obvious unit test (fire the token, assert the lease is gone) but the property-based version, because cancellation bugs are almost always race conditions and races do not show up at the timestamps you would have hand-picked.</p>
+<p>Start with the obvious unit test, because you need a fake scaffolding anyway.</p>
+<pre><code class="hljs language-python">def test_cancellation_releases_device_lease(fake_inventory, fake_queue):
+    shutdown = ShutdownToken()
+    fake_queue.push(Job(id=&quot;j1&quot;, device_kind=&quot;rig&quot;, steps=[
+        Step(&quot;setup&quot;),
+        Step(&quot;run&quot;, duration=10.0),
+        Step(&quot;teardown&quot;),
+    ]))
+
+    result = {}
+    def run_worker():
+        try:
+            worker.run_one(fake_queue, shutdown)
+        except ShutdownRequested as e:
+            result[&quot;raised&quot;] = e
+
+    worker_thread = threading.Thread(target=run_worker)
+    worker_thread.start()
+
+    # Only request shutdown after the worker has actually claimed the device,
+    # so we are exercising mid-run cancellation rather than a pre-fetch abort.
+    wait_until(lambda: fake_inventory.is_claimed(&quot;rig&quot;))
+    shutdown.request()
+    worker_thread.join(timeout=10)
+
+    assert &quot;raised&quot; in result
+    assert not fake_inventory.is_claimed(&quot;rig&quot;)
+    assert fake_queue.was_nacked(&quot;j1&quot;, requeued=True)</code></pre>
+<p>This test costs you nothing in CI time if your fake step uses <code>shutdown.wait()</code> instead of real sleeps. It catches the obvious regressions, the ones you would catch by reading the diff carefully.</p>
+<p>The version that actually earns its keep is the property-based one:</p>
+<pre><code class="hljs language-python">@hypothesis.given(cancel_after_seconds=st.floats(0.0, 5.0))
+def test_cancellation_at_any_point_leaves_clean_state(cancel_after_seconds, env):
+    shutdown = ShutdownToken()
+    env.queue.push(make_job())
+    schedule_cancel(shutdown, after=cancel_after_seconds)
+    try:
+        worker.run_one(env.queue, shutdown)
+    except ShutdownRequested:
+        pass
+    # Invariants that must hold regardless of when we cancelled:
+    assert env.inventory.held_count() == 0
+    assert env.tmp.is_empty()
+    assert env.db.open_transactions() == 0</code></pre>
+<p>Hypothesis will spray cancel timings across the interval and shrink failures down to the exact microsecond window where things broke. The bugs it finds are almost always the same shape: cancel fires between <code>claim</code> returning and the <code>try:</code> starting, or between <code>txn.commit()</code> and <code>inventory.release()</code> running, or in any other gap where you held a resource without a finalizer attached. These windows are invisible to code review and to fixed-timestamp tests. The property test makes them loud.</p>
+<p>For integration tests, run the worker in a subprocess, send it a real SIGTERM, and assert on observable state afterwards. Slow, but worth running once per CI build.</p>
+<pre><code class="hljs language-python">def test_real_sigterm_drains_in_flight_jobs():
+    worker = subprocess.Popen([sys.executable, &quot;-m&quot;, &quot;worker&quot;], ...)
+    wait_until(lambda: queue.in_progress_count() &gt; 0)
+    worker.send_signal(signal.SIGTERM)
+    worker.wait(timeout=30)
+    assert worker.returncode == 0
+    assert queue.in_progress_count() == 0
+    assert queue.pending_count() &gt; 0  # jobs were requeued</code></pre>
+<h2>The shutdown timeline</h2>
+<p>Happy path on the left, the path you get when the token never gets read on the right:</p>
+<pre><code>  HAPPY PATH                                |  UNHAPPY PATH
+                                            |
+  t=0.0  SIGTERM arrives                    |  t=0.0   SIGTERM arrives
+         handler sets event                 |          handler sets event
+  t=0.0  main loop stops fetching           |  t=0.0   main loop stops fetching
+  t=0.0  workers in shutdown.wait() wake    |  t=0.0   worker stuck in 4-min blocking call
+  t=0.5  ShutdownRequested propagates up    |          (no cancellation checkpoint)
+         ExitStack: txn rollback,           |
+         lease release, workdir cleanup     |
+  t=2.0  all jobs nacked back to queue      |  t=30.0  SIGKILL from orchestrator
+  t=2.0  close queue connection             |          process gone, no cleanup ran
+  t=2.1  flush logs                         |          device lease orphaned
+  t=2.2  exit 0                             |          txn left open on pooled conn
+                                            |          half-written file in workdir
+                                            |  t=...   janitor reclaims lease eventually
+                                            |          next job hits stale workdir,
+                                            |          confuses itself, pages on-call</code></pre>
+<p>The 0.5s number on the left is not a guarantee; it is the worst case assuming each worker checks the token at least every 0.5s (which falls out of <code>shutdown.wait(0.5)</code> in the loop). If a step does a 30-second blocking call between checks, your bound is 30 seconds, not 0.5. The bound is whatever the longest gap between cancellation checks is, full stop. Audit those gaps the same way you audit lock-held durations.</p>
+<p>Total for a well-behaved worker: about 2 seconds. Well inside any orchestrator&#39;s grace period. The divergence point between the two columns is a single design choice: did the long-running step bother to check the token.</p>
+<p>The work is a token passed down the call stack, a context manager around every external resource, and one property-based test on the abort path. Then go replace your <code>time.sleep</code> calls inside long loops with <code>shutdown.wait</code>.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

@@ -373,7 +373,7 @@ export default function init(mount, ctx) {
     // Cover fit: glyph grid fills the container (to the bottom edge); overflow is
     // clipped (.hv2-ascii has overflow:hidden). Grid aspect matches the box, so this
     // is an exact fill with negligible clip.
-    const size = Math.max(w / (cols * ADV), h / rows);
+    const size = Math.max(7, Math.max(w / (cols * ADV), h / rows));
     ascii.style.fontSize = size + 'px';
     ascii.style.lineHeight = size + 'px';
     const min = Math.min(w, h);
@@ -459,7 +459,6 @@ export default function init(mount, ctx) {
     if (!held) portrait.classList.remove('active');
   }
   function onPointerLeave() { closeReveal(); }
-  function onPointerUp() {}
   function onPointerCancel() { if (!noHover) closeReveal(); }
 
   // Latch/unlatch the persistent reveal (touch tap, Enter, Space).
@@ -588,24 +587,15 @@ export default function init(mount, ctx) {
     portrait.addEventListener('pointerenter', onPointerEnter);
     portrait.addEventListener('pointerleave', onPointerLeave);
     portrait.addEventListener('pointerdown', onPointerDown);
-    portrait.addEventListener('pointerup', onPointerUp);
     portrait.addEventListener('pointercancel', onPointerCancel);
     portrait.addEventListener('keydown', onKeyToggle);
     portrait.setAttribute('aria-pressed', 'false');
   }
 
-  // guard against 2D context loss on the offscreen work canvas: pause, then
-  // regenerate the sampled glyphs once the context is restored.
-  work.addEventListener('contextlost', (e) => { e.preventDefault(); }, false);
-  work.addEventListener('contextrestored', () => {
-    if (disposed) return;
-    if (bitmapReady || built) buildPortrait();
-  }, false);
-
   // ResizeObserver keeps ascii sized to mount/portrait, and re-samples the glyphs
   // when the responsive column count changes across a width breakpoint.
   const ro = new ResizeObserver(() => {
-    if (!disposed && built && pickCols() !== cols && (bitmapReady || built)) {
+    if (!disposed && built && pickCols() !== cols) {
       buildPortrait();
     } else {
       fitAscii();
@@ -692,7 +682,6 @@ export default function init(mount, ctx) {
         portrait.removeEventListener('pointerenter', onPointerEnter);
         portrait.removeEventListener('pointerleave', onPointerLeave);
         portrait.removeEventListener('pointerdown', onPointerDown);
-        portrait.removeEventListener('pointerup', onPointerUp);
         portrait.removeEventListener('pointercancel', onPointerCancel);
         portrait.removeEventListener('keydown', onKeyToggle);
       }

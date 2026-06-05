@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Designing CLI subcommand hierarchies that scale past twenty verbs - Yash Bhardwaj</title>
+<meta name="description" content="the awkward middle age of an internal tool, where --help becomes a wall of text and nobody remembers the flag order">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/18-cli-subcommand-hierarchies-twenty-verbs.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Designing CLI subcommand hierarchies that scale past twenty verbs - Yash Bhardwaj">
+<meta property="og:description" content="the awkward middle age of an internal tool, where --help becomes a wall of text and nobody remembers the flag order">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/18-cli-subcommand-hierarchies-twenty-verbs.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Designing CLI subcommand hierarchies that scale past twenty verbs - Yash Bhardwaj">
+<meta name="twitter:description" content="the awkward middle age of an internal tool, where --help becomes a wall of text and nobody remembers the flag order">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Designing CLI subcommand hierarchies that scale past twenty verbs","datePublished":"2026-05-08","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/18-cli-subcommand-hierarchies-twenty-verbs.html"},"url":"https://y4shbhardwaj.com/article/18-cli-subcommand-hierarchies-twenty-verbs.html","description":"the awkward middle age of an internal tool, where --help becomes a wall of text and nobody remembers the flag order","keywords":"cli, design, tooling"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">cli</span><span class="chip">design</span><span class="chip">tooling</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">May 8, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Designing CLI subcommand hierarchies that scale past twenty verbs</h1>
+<p><em>the awkward middle age of an internal tool, where <code>--help</code> becomes a wall of text and nobody remembers the flag order</em></p>
+<p>A fleet management CLI starts out as five verbs. <code>provision</code>, <code>reboot</code>, <code>drain</code>, <code>status</code>, <code>logs</code>. Nobody writes a design doc. Somebody adds <code>cordon</code>, then <code>uncordon</code>, then <code>quarantine</code>. Six months in there are nineteen verbs, and the on-call runbook has phrases like &quot;remember that <code>recover</code> is different from <code>reset</code>, and <code>restart</code> is just <code>reboot</code> for the BMC.&quot;</p>
+<p>That is the wall. Not when the tool stops working, but when new hires need to read source to figure out which verb does the thing they want. Fixing it is mostly taxonomy, partly muscle memory, and slightly a fight about whether <code>fleet host reboot</code> reads better than <code>fleet reboot host</code>.</p>
+<p>I refactored one of these recently. A tool called <code>flx</code> had grown to 34 top-level verbs over two years. The hierarchy rewrite cut discovery time for new operators from &quot;grep the help text&quot; to &quot;tab through the first noun.&quot; A separate change, adding aliases for the four most-used verbs, cut average command length from 47 keystrokes to 24 across a month of shell history from a small operator group. Most of the keystroke win came from aliases; the hierarchy bought discoverability. Here is what worked, what didn&#39;t, and the parts I would do differently.</p>
+<h2>What flat sprawl actually looks like</h2>
+<p>The starting point looked like this in <code>--help</code>:</p>
+<pre><code>flx 1.0
+USAGE: flx &lt;command&gt; [args...]
+
+COMMANDS:
+  provision      reboot         restart        drain
+  cordon         uncordon       quarantine     release
+  status         describe       inspect        logs
+  events         topology       neighbors      power
+  bmc-reset      bmc-update     bmc-status     firmware
+  pkg-list       pkg-install    pkg-remove     pkg-pin
+  user-add       user-remove    user-list      role-grant
+  role-revoke    audit          export         import
+  diff           snapshot</code></pre>
+<p>Thirty-four verbs, no grouping, alphabetical for politeness. The problems compound:</p>
+<ul>
+<li><code>reboot</code> and <code>restart</code> and <code>bmc-reset</code> overlap in a way only the original author understood</li>
+<li><code>pkg-*</code> and <code>user-*</code> and <code>bmc-*</code> and <code>role-*</code> are clearly noun prefixes pretending to be verbs</li>
+<li>tab completion offers thirty-four options after <code>flx &lt;TAB&gt;</code>, which is the same as offering zero</li>
+<li>the help text scrolls past one screen on a 24-line terminal, so the bottom verbs are functionally invisible</li>
+<li>nobody can remember whether the snapshot verb takes a hostname first or a snapshot name first, because the entire surface is positional and inconsistent</li>
+</ul>
+<p>The <code>pkg-</code>, <code>user-</code>, <code>bmc-</code>, <code>role-</code> prefixes are the tell. The team had already been grouping informally with hyphens, they just hadn&#39;t promoted the grouping to syntax. That is the moment to introduce a second level.</p>
+<h2>Three taxonomies, briefly</h2>
+<p>Before redesigning anything, pick a shape. There are three serious options, and the choice cascades through completion, docs, and aliases.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>layout</th>
+<th>example</th>
+<th>strengths</th>
+<th>weaknesses</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>verb-first</td>
+<td><code>flx reboot host h-42</code></td>
+<td>reads like English, short for one-off actions</td>
+<td>verbs collide across nouns (reboot host vs reboot bmc), help becomes a verb dump</td>
+</tr>
+<tr>
+<td>noun-first</td>
+<td><code>flx host reboot h-42</code></td>
+<td>groups by object, completion narrows fast, scales to hundreds of verbs</td>
+<td>feels backwards for muscle-memory verbs (<code>flx host status</code> vs <code>flx status</code>)</td>
+</tr>
+<tr>
+<td>capability-grouped</td>
+<td><code>flx ops reboot host h-42</code></td>
+<td>clean for permission boundaries (ops vs admin vs read), nice for RBAC</td>
+<td>extra typing for every command, the top level is abstract and nobody likes guessing</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code>git</code> is verb-first and got away with it because the verbs are universal enough (<code>clone</code>, <code>commit</code>, <code>push</code>) that you don&#39;t fight muscle memory. It also has well over a hundred verbs across porcelain and plumbing (<a href="https://git-scm.com/docs/git">https://git-scm.com/docs/git</a>), which is why <code>git help -a</code> is unreadable and why every team has a wiki page of &quot;the seven git commands you actually need.&quot;</p>
+<p><code>kubectl</code> is verb-first at the top (<code>get</code>, <code>describe</code>, <code>apply</code>, <code>delete</code>) but the noun comes second and is required (<code>kubectl get pods</code>), with a few noun-first exceptions like <code>kubectl rollout</code> and <code>kubectl config</code>. This works because the verbs are a small closed set (about a dozen) and the nouns are open (custom resources). If your verb count is bigger than your noun count, this falls apart.</p>
+<p><code>aws</code> and <code>gcloud</code> group by service noun first (<code>aws ec2 ...</code>, <code>gcloud compute instances ...</code>), though individual operations are themselves verb-noun (<code>describe-instances</code> (<a href="https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instances.html">https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instances.html</a>), <code>instances list</code>). They have hundreds of nouns and thousands of leaf commands. The noun-first shape is the only one that survives at that scale, because tab completion at each level prunes the tree by an order of magnitude.</p>
+<p>For fleet management, noun-first was the right call. The verb count was bigger than the noun count (34 verbs across ~6 implicit nouns), and the actions naturally cluster by what they act on. The verbs are also not universal: <code>drain</code> means something specific to a host, <code>pin</code> means something specific to a package version, and pretending they are general verbs invites collisions.</p>
+<h2>The target shape</h2>
+<p>We landed on three top-level nouns plus one escape hatch:</p>
+<pre><code>flx host    &lt;verb&gt;  [args]   # anything that acts on a physical machine
+flx pkg     &lt;verb&gt;  [args]   # firmware, BMC images, OS packages
+flx access  &lt;verb&gt;  [args]   # users, roles, audit
+flx ops     &lt;verb&gt;  [args]   # snapshots, exports, cross-cutting</code></pre>
+<p><code>ops</code> is the escape hatch for &quot;this doesn&#39;t fit a noun&quot; commands. Every CLI of size has one. Resist the urge to make it bigger than the real nouns. If <code>ops</code> grows past about five verbs, you missed a noun.</p>
+<p>Under each noun, verbs are short and consistent. Same verbs mean the same thing across nouns where possible:</p>
+<pre><code>flx host reboot h-42
+flx host drain h-42
+flx host status h-42
+flx host logs h-42 --since 10m
+flx host quarantine h-42 --reason &quot;PSU flapping&quot;
+
+flx pkg install firmware-bmc-1.4.2 --to h-42
+flx pkg list --installed --on h-42
+flx pkg pin firmware-bmc-1.4.2 --on h-42
+flx pkg diff h-42 h-43
+
+flx access user add alice --role operator
+flx access role grant operator reboot,drain
+flx access audit --since 24h --user alice
+
+flx ops snapshot create --tag pre-upgrade
+flx ops export inventory --format json</code></pre>
+<p>The verbs that did the same thing under different names (<code>reboot</code>, <code>restart</code>, <code>bmc-reset</code>) collapsed into <code>flx host reboot</code> with a <code>--target {os,bmc}</code> flag, default <code>os</code>. The verbs that were noun-prefix masquerades (<code>pkg-install</code>, <code>user-add</code>) lost the prefix and became proper subcommands. The catch-all verbs (<code>describe</code>, <code>inspect</code>) merged into <code>status</code> with verbosity flags.</p>
+<p>Total verb count under the new tree: still 34. Conservation of complexity is real. But each noun&#39;s <code>--help</code> now shows 8-12 verbs, which fits on a screen, and tab completion at the first level offers four options instead of thirty-four.</p>
+<h2>When to introduce the second level</h2>
+<p>The rule I use, post-fact rationalized: introduce a noun layer when any of the following is true.</p>
+<ul>
+<li>You have more than 12-15 top-level verbs and <code>--help</code> no longer fits on one screen.</li>
+<li>You see informal noun-prefixing in the verb names (<code>pkg-install</code>, <code>bmc-reset</code>).</li>
+<li>The same verb means meaningfully different things depending on context (<code>reboot</code> a host vs <code>reboot</code> a service).</li>
+<li>You want RBAC boundaries that map cleanly to subtrees (read-only users get <code>host status</code> and <code>host logs</code> but not <code>host *</code>).</li>
+<li>Tab completion at the top level returns enough options that users ignore it and type the verb from memory.</li>
+</ul>
+<p>Fewer than 12 verbs and you&#39;re better off staying flat. The second level adds typing for everyone in exchange for organization that doesn&#39;t pay off at small scale. <code>cat</code>, <code>ls</code>, <code>grep</code> are flat and will be flat forever, correctly.</p>
+<p>The breakeven point is somewhere around 15 verbs in my experience, but I&#39;ve never measured it rigorously. The more honest signal is when you find yourself writing internal docs that say &quot;to do X, run <code>flx foo</code>; not to be confused with <code>flx bar</code> which is similar but different.&quot; That sentence means you needed the noun layer two verbs ago.</p>
+<h2>Aliases for muscle memory</h2>
+<p>The hard truth about reorganizing a CLI people use every day: the on-call team will hate you for two weeks. Every command they have wired into shell history and runbooks is wrong. Aliases are how you buy goodwill.</p>
+<p>Two flavors matter:</p>
+<p><strong>Top-level shortcuts</strong> for the verbs that account for the bulk of daily use. Track shell history for a week and ship a config:</p>
+<pre><code>flx reboot       -&gt; flx host reboot
+flx status       -&gt; flx host status
+flx logs         -&gt; flx host logs
+flx drain        -&gt; flx host drain</code></pre>
+<p>These are the four commands that accounted for ~70% of invocations in the history. Aliasing them at the top level means muscle memory keeps working, while the new hierarchy is there for everything else. You print a deprecation notice in stderr for the first month and then quietly leave them in forever, because nobody is going to retype <code>flx host reboot</code> ten times an hour when <code>flx reboot</code> works.</p>
+<p><strong>Compact paths</strong> for common drilldowns:</p>
+<pre><code>flx h &lt;id&gt;       -&gt; flx host status &lt;id&gt;
+flx hl &lt;id&gt;      -&gt; flx host logs &lt;id&gt;</code></pre>
+<p>Two-letter aliases are aggressive but they earn their keep for the commands you run dozens of times an hour. The convention I like: first letter of each noun in the path. <code>hl</code> is unambiguous; <code>hs</code> would conflict with future shorthand for <code>host snapshot</code> so we left it out.</p>
+<p>The deprecation policy that worked: aliases are forever; only the long-deprecated <code>pkg-install</code>-style hyphenated forms got a real removal date. Hyphen-prefixed legacy verbs printed:</p>
+<pre><code>WARN: &#39;flx pkg-install&#39; is deprecated and will be removed in v2.0 (2026-09-01).
+      Use &#39;flx pkg install&#39; instead.</code></pre>
+<p>Three releases later, the legacy forms were gone. The single-word aliases (<code>reboot</code>, <code>status</code>, <code>logs</code>) stayed.</p>
+<h2>Tab completion that stays useful</h2>
+<p>A noun-first layout only pays off if tab completion is wired correctly. Three things matter.</p>
+<p>First, <strong>dynamic completion at every level</strong>. Static completion that lists subcommands is table stakes, but the leaf often takes a hostname or package name, and that needs to talk to the live inventory:</p>
+<pre><code class="hljs language-bash"># bash completion stub, the real one is generated
+# real implementation uses null-separated output and `mapfile` to handle spaces in names
+_flx() {
+  local cur prev words cword
+  _init_completion || return
+  case &quot;$cword&quot; in
+    1) COMPREPLY=($(compgen -W &quot;host pkg access ops&quot; -- &quot;$cur&quot;)) ;;
+    2) COMPREPLY=($(compgen -W &quot;$(flx __complete verbs ${words[1]})&quot; -- &quot;$cur&quot;)) ;;
+    *) COMPREPLY=($(compgen -W &quot;$(flx __complete args ${words[1]} ${words[2]})&quot; -- &quot;$cur&quot;)) ;;
+  esac
+}
+complete -F _flx flx</code></pre>
+<p>The <code>__complete</code> subcommand is hidden, returns whitespace-separated tokens, and caches inventory lookups for a few seconds so hitting tab repeatedly doesn&#39;t hammer the API. Without dynamic completion, the user types <code>flx host reboot h-</code> and stares at a blinking cursor, which is worse than no completion at all.</p>
+<p>Second, <strong>help integration</strong>. <code>flx host</code> with no verb should print the verbs under <code>host</code> with one-line descriptions, not error out. <code>flx host --help</code> should be the same thing with more detail. <code>flx host reboot --help</code> should show flags and an example. All three should work without arguments, which sounds obvious until you find a CLI where the top-level <code>--help</code> is great and <code>flx host --help</code> segfaults.</p>
+<p>Third, <strong>fuzzy matching for typos</strong>. If a user types <code>flx host rebot</code>, the CLI should suggest <code>reboot</code> rather than erroring:</p>
+<pre><code>$ flx host rebot h-42
+error: &#39;rebot&#39; is not a valid verb under &#39;host&#39;
+did you mean: reboot? (run &#39;flx host --help&#39; for a list)</code></pre>
+<p>Damerau-Levenshtein distance of 2 or less is the usual cutoff (it handles single-character transpositions as one edit, which catches the most common typos). Don&#39;t auto-correct, just suggest. Auto-correction across destructive verbs is how you reboot the wrong fleet.</p>
+<h2>The migration cost, honestly</h2>
+<p>The restructure took about three weeks of one engineer&#39;s time, plus a week of fixing runbook references, plus a week of dashboards calling shell scripts that called the CLI. The actual code refactor was a day. The rest was migration.</p>
+<p>What I&#39;d do differently:</p>
+<ul>
+<li>Ship the aliases on day one, not day fourteen. We thought we&#39;d be fine without <code>flx reboot</code> aliasing and got loud feedback within hours.</li>
+<li>Generate the completion scripts in CI from a single source of truth instead of hand-maintaining bash, zsh, and fish versions. We did this eventually but should have started there.</li>
+<li>The hidden <code>__complete</code> subcommand needs a stable contract. We changed its output format once and broke completion for everyone who hadn&#39;t reinstalled the completion script. Treat it like a public API.</li>
+</ul>
+<p>As noted up top, the keystroke halving came from aliases, not hierarchy. The hierarchy&#39;s payoff is discoverability: new hires can guess <code>flx host</code> and see what verbs exist, instead of grepping the help output for whichever verb sounds right.</p>
+<p>That is the actual win. The CLI is no longer a closed-book exam.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

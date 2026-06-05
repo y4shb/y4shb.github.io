@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adaptive concurrency limits with gradient and Little&#39;s law - Yash Bhardwaj</title>
+<meta name="description" content="Why your 200-thread pool is a hardcoded apology for not measuring anything">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/14-adaptive-concurrency-limits-gradient-littles-law.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Adaptive concurrency limits with gradient and Little&#39;s law - Yash Bhardwaj">
+<meta property="og:description" content="Why your 200-thread pool is a hardcoded apology for not measuring anything">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/14-adaptive-concurrency-limits-gradient-littles-law.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Adaptive concurrency limits with gradient and Little&#39;s law - Yash Bhardwaj">
+<meta name="twitter:description" content="Why your 200-thread pool is a hardcoded apology for not measuring anything">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Adaptive concurrency limits with gradient and Little's law","datePublished":"2026-03-19","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/14-adaptive-concurrency-limits-gradient-littles-law.html"},"url":"https://y4shbhardwaj.com/article/14-adaptive-concurrency-limits-gradient-littles-law.html","description":"Why your 200-thread pool is a hardcoded apology for not measuring anything","keywords":"concurrency, performance, limits"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">concurrency</span><span class="chip">performance</span><span class="chip">limits</span></div></div><div class="meta-bottom"><span class="meta-read">11 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Mar 19, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Adaptive concurrency limits with gradient and Little&#39;s law</h1>
+<p><em>why your 200-thread pool is a hardcoded apology for not measuring anything</em></p>
+<p>A fixed concurrency limit is a number someone picked on a Tuesday afternoon based on a load test that hasn&#39;t been rerun since the last major version of the downstream service. It worked then. It probably still works on a calm day. The interesting question is what it does on a Wednesday when the downstream payment service is in the middle of a slow GC pause and your p99 is climbing toward the dashboard threshold that wakes someone up.</p>
+<p>The honest answer is that any static number is wrong almost all the time, just by varying amounts. The useful question is whether you can pick a number that floats with conditions without making the system itself unstable. Two families of algorithms are worth knowing: gradient-based limiters that infer congestion from the second derivative of latency, and Little&#39;s-law limiters that calculate the optimal in-flight count from observed throughput and service time. They look similar from the outside. They behave quite differently when the floor falls out.</p>
+<h2>The fixed-pool failure mode</h2>
+<p>Imagine a service called <code>checkout-svc</code> calling a downstream payment provider, <code>payclient</code>, through a fixed semaphore of 200 permits. On a normal day, payclient is fast and <code>checkout-svc</code> runs well below the ceiling. Most of the permits sit idle. Nobody notices, because everything is fine.</p>
+<p>Now payclient has a noisy neighbor on its shared infrastructure. Latency drifts upward. Your in-flight count climbs because requests are arriving at the same rate but each one holds a permit longer. Eventually you hit 200 in-flight, the semaphore starts blocking, and the latency you observe (which now includes queue wait time) climbs steeply. The pager fires.</p>
+<p>The 200-permit limit is doing exactly what it was designed to do, which is the problem. It does not know that the downstream service has changed its service time. It cannot tell the difference between &quot;we have capacity to spare&quot; and &quot;we are about to make everything worse by piling on more concurrent requests.&quot;</p>
+<pre><code>fixed pool, downstream latency step:
+
+latency (ms)        |                    ___________
+                    |                   /
+                    |                  /
+                    |                 /
+                    |                /
+                    |    __________/
+                    |___/
+                    +-------------------- time
+                       t0: latency step  t1: queue saturates
+                       (downstream slows) (in-flight hits the
+                                          pool ceiling, observed
+                                          p99 climbs)</code></pre>
+<h2>Little&#39;s law, briefly</h2>
+<p>Little&#39;s law says that for any stable queueing system, the average number of items in the system equals the average arrival rate times the average time each item spends there. Written as <code>L = λW</code>. It does not depend on the distribution of anything. It is true in the way that conservation of mass is true.</p>
+<p>For a concurrency limiter this is the entire game. If you observe throughput (<code>λ</code>, requests per second completing) and you observe service time (<code>W</code>, time per request), then the number of concurrent requests the system is sustaining is <code>L = λW</code>. If you set your limit at or near that number, you are matching the offered load. If you set it much higher, you are inviting queueing inside the downstream. If you set it much lower, you are leaving throughput on the table.</p>
+<p>The version of this that actually shows up in code adds variance terms (Kingman&#39;s G/G/1 approximation does this for general arrivals and service times) and tells you how queueing time blows up as you approach saturation. The practical takeaway: for the simplest M/M/1 case the mean wait scales as <code>1 / (1 - ρ)</code>, so at ρ=0.8 you are already paying roughly 4x the service time in queue wait, and the curve keeps getting worse. Keep utilization in the 70-80% range depending on how tail-sensitive your service is; the last 20% of capacity costs you more in p99 than the first 80% did.</p>
+<h2>Gradient limiters: watch the derivative</h2>
+<p>The Netflix <code>concurrency-limits</code> library popularized a different approach. Rather than computing <code>L = λW</code> directly, gradient limiters compare a short-term moving average of latency against a long-term one. If the short term is significantly higher than the long term, you are running into queueing, so you back off. If it is lower or equal, you increase the limit.</p>
+<p>A simplified Gradient-style limiter looks roughly like this (the exponential smoothing on the short-term RTT and the <code>4 * sqrt(limit)</code> queue allowance are teaching choices, not the Netflix Gradient2 defaults; see the discussion after the code):</p>
+<pre><code class="hljs language-python">class GradientLimiter:
+    def __init__(self, initial_limit=10, max_limit=200, smoothing=0.2):
+        self.limit = initial_limit
+        self.max_limit = max_limit
+        self.smoothing = smoothing
+        self.long_rtt = None   # exponentially smoothed baseline
+        self.short_rtt = None  # recent sample window
+
+    def update(self, sample_rtt_ms, in_flight):
+        # initialize on first sample
+        if self.long_rtt is None:
+            self.long_rtt = sample_rtt_ms
+            self.short_rtt = sample_rtt_ms
+            return self.limit
+
+        # don&#39;t learn from idle-period samples: they bias the long-term
+        # baseline downward and make the limiter over-eager to shrink
+        # the next time real load returns. Skip both the RTT updates
+        # and the limit adjustment when we&#39;re nowhere near the limit.
+        if in_flight * 2 &lt; self.limit:
+            return self.limit
+
+        # long-term tracks slowly, recovers from transient spikes
+        self.long_rtt = (1 - 0.01) * self.long_rtt + 0.01 * sample_rtt_ms
+        # short-term tracks quickly, reflects current conditions
+        self.short_rtt = (1 - self.smoothing) * self.short_rtt \
+                         + self.smoothing * sample_rtt_ms
+
+        # gradient: &lt;1 means we&#39;re slower than baseline (congested)
+        gradient = max(0.5, min(1.0, self.long_rtt / self.short_rtt))
+
+        # adjustment: grow by a Gradient-style queue allowance when
+        # healthy, shrink proportionally when congested. The original
+        # Gradient algorithm scaled this as 4*sqrt(limit); Gradient2
+        # defaults to a flat constant (4) that you can override with
+        # a function of the current limit.
+        queue_size = int(4 * (self.limit ** 0.5))
+        new_limit = gradient * self.limit + queue_size
+
+        self.limit = max(1, min(self.max_limit, int(new_limit)))
+        return self.limit</code></pre>
+<p>A note on what Gradient2 actually does in the Netflix library: it compares the most recent RTT sample directly against a long-term exponentially-weighted baseline (default window ~600 samples) and applies a smoothing factor (default 0.2) to the <strong>limit update itself</strong>, not to the RTT (sources: <a href="https://github.com/Netflix/concurrency-limits/blob/main/concurrency-limits-core/src/main/java/com/netflix/concurrency/limits/limit/Gradient2Limit.java">Gradient2Limit.java</a>, <a href="https://github.com/Netflix/concurrency-limits/pull/88">PR #88</a>). The dials that matter in production are the long-window length, the <code>queueSize</code> function, and the limit-update smoothing.</p>
+<p>The teaching version above smooths the short-term RTT (0.2) and the long-term RTT (0.01) instead, so the gradient ratio reflects two windows over the same RTT stream. That makes the algorithm easier to reason about on paper, but it is not the library default; treat the specific 0.2 / 0.01 numbers as illustrative of the pseudocode shown, not as production defaults.</p>
+<p>Whichever smoothing scheme you use, the dial behaves the same way directionally. Set it too high and you react to single-sample noise; set it too low and you miss real degradations. If your traffic is very low, scale the smoothing up (or require a minimum sample count) so you are not basing decisions on three samples.</p>
+<h2>Little&#39;s law in practice: VegasLimit and the BDP analogy</h2>
+<p>The other family takes Little&#39;s law literally. TCP Vegas does this for network congestion: it estimates the bandwidth-delay product (BDP) from observed RTT and throughput, and it tries to keep the number of in-flight bytes close to BDP. Below BDP and you are underutilizing. Above BDP and you are filling someone&#39;s buffer, which inflates RTT without adding throughput.</p>
+<p>A Little&#39;s-law concurrency limiter does the same thing for requests. It observes the no-load RTT (the minimum service time it has ever seen) and the current RTT, then computes how many extra requests are queued:</p>
+<pre><code class="hljs language-python">class VegasLimiter:
+    # Note: constant alpha=3, beta=6 keeps the example readable.
+    # Netflix&#39;s VegasLimit actually scales both as functions of the
+    # current limit: alpha = 3 * log10(limit) and beta = 6 * log10(limit)
+    # (https://github.com/Netflix/concurrency-limits/blob/main/concurrency-limits-core/src/main/java/com/netflix/concurrency/limits/limit/VegasLimit.java).
+    # The original Brakmo/Peterson TCP Vegas paper used alpha=1, beta=3
+    # extra in-flight segments (https://en.wikipedia.org/wiki/TCP_Vegas).
+    def __init__(self, initial_limit=10, alpha=3, beta=6):
+        self.limit = initial_limit
+        self.alpha = alpha  # underflow threshold
+        self.beta = beta    # overflow threshold
+        self.rtt_noload = float(&#39;inf&#39;)
+
+    def update(self, sample_rtt_ms, in_flight):
+        # track the best (lowest) RTT we&#39;ve ever observed
+        self.rtt_noload = min(self.rtt_noload, sample_rtt_ms)
+
+        # how many in-flight requests are &quot;extra&quot; beyond
+        # what the no-load latency would account for?
+        # = in_flight - in_flight * (rtt_noload / sample_rtt);
+        # the second term is the BDP (Little&#39;s-law in-flight count)
+        # at the current observed throughput.
+        queue_size = in_flight * (1 - self.rtt_noload / sample_rtt_ms)
+
+        if queue_size &lt; self.alpha:
+            # underutilized: grow
+            self.limit += 1
+        elif queue_size &gt; self.beta:
+            # queueing detected: shrink
+            self.limit -= 1
+        # else: hold steady
+
+        self.limit = max(1, self.limit)
+        return self.limit</code></pre>
+<p>The <code>alpha</code> and <code>beta</code> thresholds define a dead zone. Inside it, you do not change the limit, which prevents oscillation. Outside it, you take a small step. The tradeoff with the gradient limiter is that VegasLimit reacts to the absolute queue size rather than the rate of change, so it is more stable but slower to respond to step changes.</p>
+<h2>Comparison</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Fixed pool</th>
+<th>Gradient (Gradient2)</th>
+<th>Little&#39;s law (Vegas)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Reacts to latency steps</td>
+<td>No</td>
+<td>Yes, within smoothing window</td>
+<td>Yes, but slower</td>
+</tr>
+<tr>
+<td>Oscillation risk</td>
+<td>None</td>
+<td>Medium (smoothing-dependent)</td>
+<td>Low (dead zone)</td>
+</tr>
+<tr>
+<td>Needs no-load RTT estimate</td>
+<td>No</td>
+<td>No</td>
+<td>Yes (uses observed min)</td>
+</tr>
+<tr>
+<td>Tuning surface</td>
+<td>One number</td>
+<td>Smoothing + queue size formula</td>
+<td>Alpha, beta thresholds</td>
+</tr>
+<tr>
+<td>Behavior on cold start</td>
+<td>Whatever you set</td>
+<td>Grows from initial limit</td>
+<td>Grows from initial limit</td>
+</tr>
+<tr>
+<td>Behavior under sustained overload</td>
+<td>Saturates, queues internally</td>
+<td>Contracts</td>
+<td>Contracts</td>
+</tr>
+<tr>
+<td>What it optimizes for</td>
+<td>Nothing; it is a guess</td>
+<td>Keeping latency near baseline</td>
+<td>Keeping queue depth bounded</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>In production both work. The gradient version is more aggressive and tends to find a higher steady-state limit, which gives you more throughput on a good day. The Vegas version is more conservative and tends to hold a tighter limit, which gives you better p99 on a bad day. Pick based on which day you fear more.</p>
+<h2>The payment-client incident (illustrative)</h2>
+<p>Back to the <code>checkout-svc</code> / <code>payclient</code> sketch. Imagine replacing the fixed 200-permit pool with a Gradient2 limiter, keyed per downstream endpoint so a degradation in <code>payclient.charges</code> does not cause <code>payclient.refunds</code> to shrink.</p>
+<p>The first thing you would expect to see is the steady-state limit settling near the actual in-flight count, say around 50 permits, rather than parking at the unused 200. The old pool had been advertising more capacity than the system ever consumed, and a large fraction of that headroom only ever got used as queue depth when something went wrong.</p>
+<p>Under a sustained downstream latency step, the gradient limiter&#39;s short-term RTT diverges from its long-term baseline, the gradient ratio drops below 1.0, and the computed limit contracts over the next tens of seconds. The semaphore starts refusing admission at the edge (what the caller does with that refusal is a separate concern; see any of the standard load-shedding writeups). Painful, but bounded.</p>
+<p>The qualitative difference versus the fixed pool: with the adaptive limit, tail latency stays close to baseline because the limiter throttles arrivals before the downstream queues internally. With a fixed pool sized well above the working set, the pool itself becomes the queue, observed p99 climbs to something dominated by queue wait, and it takes minutes (not seconds) for that queue to drain after the underlying latency recovers.</p>
+<p>A corollary worth flagging: any load test you run against a service with an adaptive limiter must be open-loop (arrivals independent of completions). A closed-loop test with a fixed number of virtual users will silently throttle itself when the limiter contracts, and the report will read &quot;everything was fine&quot; because no requests were rejected. They were just never sent. Treat that as the measurement-side failure mode of the same feedback loop you just installed.</p>
+<pre><code>gradient limiter, same downstream latency step:
+
+limit (permits)
+                  |  ----  (fixed pool ceiling, unused)
+                  |
+                  |  ___
+                  |     \_____           _______
+                  |           \         /
+                  |            \_______/
+                  +------------------------------- time
+                                t0: step    t1: recovery
+                                            (limit grows back)
+
+observed p99
+                  |
+                  |        __
+                  |       /  \____
+                  |      /        \___
+                  |  ___/             \___
+                  |                       \___
+                  +------------------------------- time
+                       t0          t1</code></pre>
+<h2>Where the gradient approach falls down</h2>
+<p>It would be irresponsible to pretend the gradient approach is free. Three failure modes are worth knowing.</p>
+<p>First, if your downstream is consistently slow rather than transiently slow, the long-term RTT eventually catches up to the short-term RTT and the gradient ratio drifts back to 1.0. The limiter forgets it was ever supposed to be cautious. This is fine if the new slow latency is the new normal and you should be sized for it. It is a problem if you want to remember the old baseline as your aspiration. The fix is usually to clamp the long-term RTT or to use a slowly-decaying minimum rather than an exponentially-weighted average.</p>
+<p>Second, the limiter assumes that the latency it observes is mostly downstream. If the latency includes time spent waiting for the limiter&#39;s own semaphore, you have a positive feedback loop: more queue wait inflates measured RTT, the gradient drops, the limit shrinks, queue wait gets worse. The standard fix is to measure only the downstream call time, not the time from when the request entered the limiter.</p>
+<p>Third, very low traffic breaks both gradient and Vegas. If you only get 2 requests per second, your &quot;short-term&quot; window is dominated by the variance of individual samples. The library implementations usually special-case this with a minimum sample count before adjusting, but if you write your own, make sure you do too.</p>
+<h2>What to actually do</h2>
+<p>If you are running a fixed thread pool or semaphore today against a remote service that has any latency variance at all, replace it. Either family of algorithm will be better than what you have. Start with whichever your platform&#39;s standard library supports, tune the smoothing or thresholds against a load test that includes a synthetic latency step, and add metrics on the current limit value so you can see it move.</p>
+<p>The number is not actually that interesting once it&#39;s adaptive. What&#39;s interesting is that the system now has a feedback loop where there used to be a guess, and the guess can finally retire.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

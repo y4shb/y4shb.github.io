@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Expand and contract schema migrations on busy tables - Yash Bhardwaj</title>
+<meta name="description" content="Five phases, each with its own way to wedge production">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/12-expand-contract-schema-migrations-busy-tables.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Expand and contract schema migrations on busy tables - Yash Bhardwaj">
+<meta property="og:description" content="Five phases, each with its own way to wedge production">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/12-expand-contract-schema-migrations-busy-tables.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Expand and contract schema migrations on busy tables - Yash Bhardwaj">
+<meta name="twitter:description" content="Five phases, each with its own way to wedge production">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Expand and contract schema migrations on busy tables","datePublished":"2026-02-17","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/12-expand-contract-schema-migrations-busy-tables.html"},"url":"https://y4shbhardwaj.com/article/12-expand-contract-schema-migrations-busy-tables.html","description":"Five phases, each with its own way to wedge production","keywords":"migrations, databases, schema"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">migrations</span><span class="chip">databases</span><span class="chip">schema</span></div></div><div class="meta-bottom"><span class="meta-read">12 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Feb 17, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Expand and contract schema migrations on busy tables</h1>
+<p><em>five phases, each with its own way to wedge production</em></p>
+<p>The dual-write rename looks fine on a whiteboard. Add a column, copy the data, switch reads, drop the old column. Four arrows, maybe five. Then you try it on <code>transactions</code> at 4,200 writes per second with 900 million rows and a foreign key from <code>ledger_entries</code>, and you discover that each arrow is actually a multi-day operation with its own failure modes, its own lock contention story, and its own way of leaving you stranded if you bail halfway.</p>
+<p>The pattern I will walk through is the one most teams converge on after they have hurt themselves at least once: expand, backfill, dual-write, cut over reads, contract. The example throughout is renaming <code>transactions.amount_cents</code> (a <code>BIGINT</code>) to a typed <code>amount</code> struct (<code>amount_value BIGINT</code>, <code>amount_currency CHAR(3)</code>, <code>amount_scale SMALLINT</code>) so the system can finally handle JPY and BHD without the comment <code>-- assume USD</code> haunting six services. Same table, same row count, same backfill window of roughly 36 hours.</p>
+<h2>The five phases, briefly</h2>
+<pre><code>phase 1  EXPAND       add nullable columns, no app changes
+phase 2  BACKFILL     copy old -&gt; new in batches, idempotent
+phase 3  DUAL-WRITE   app writes both, reads still old
+phase 4  CUT READS    flip readers to new, old still written
+phase 5  CONTRACT     stop writing old, drop column</code></pre>
+<p>Each phase is a deployable state. That property is the whole point. If anything goes sideways at phase 3, you roll the app back to phase 2 and nothing breaks, because phase 2 left the database in a state that phase 2&#39;s app code still understands. Skip that property and you have a flag day, not a migration.</p>
+<h2>Phase 1: add the columns</h2>
+<p>This is the phase that looks free and is not. <code>ADD COLUMN</code> with no default has been metadata-only on Postgres forever; since PG11, even <code>ADD COLUMN ... DEFAULT &#39;USD&#39;</code> is metadata-only via a virtual default stored in <code>pg_attribute.atthasmissing</code>. Either way the statement takes an <code>AccessExclusiveLock</code> for the metadata update. The lock is held briefly but it queues behind every running statement on the table, and every statement starting after it queues behind it. On a 4k QPS table, &quot;briefly&quot; is the gap between a long-running <code>SELECT</code> and your <code>ALTER</code>, and if some analyst is running a 90-second aggregate, your one-millisecond DDL blocks every write for 90 seconds.</p>
+<p>The fix is <code>lock_timeout</code>, set absurdly low, with retry:</p>
+<pre><code class="hljs language-sql">SET lock_timeout = &#39;150ms&#39;;
+ALTER TABLE transactions
+  ADD COLUMN amount_value    BIGINT,
+  ADD COLUMN amount_currency CHAR(3),
+  ADD COLUMN amount_scale    SMALLINT;</code></pre>
+<p>If it fails, you sleep a few seconds and try again. The migration runner I have seen work well is a tiny loop that retries for up to an hour and then pages someone, on the theory that an hour of failure means something is genuinely wedged, not just unlucky. MySQL&#39;s online DDL story is different (the <code>INSTANT</code> algorithm in 8.0.12+ for nullable adds, otherwise <code>INPLACE</code> with a metadata lock window), but the principle is the same: short lock window, retry, do not block forever.</p>
+<p>Do not add a default value here. The virtual default is fast, but old rows then synthesize the default on read, and you lose the ability to distinguish unwritten rows from rows the app has actually touched. That distinction is exactly what phase 2 needs. Keep the column nullable so the backfill predicate is a simple <code>WHERE amount_value IS NULL</code> (see the <code>atthasmissing</code> column on <a href="https://www.postgresql.org/docs/current/sql-altertable.html">ALTER TABLE</a> for what the virtual default actually stores).</p>
+<p>Indexes: do not create them yet. Phase 1 should not create any index on the new column. The reason is phase 2.</p>
+<h2>Phase 2: backfill, slowly and on purpose</h2>
+<p>The backfill is where everyone learns about long transactions. The naive version:</p>
+<pre><code class="hljs language-sql">UPDATE transactions
+   SET amount_value = amount_cents,
+       amount_currency = &#39;USD&#39;,
+       amount_scale = 2
+ WHERE amount_value IS NULL;</code></pre>
+<p>On 900M rows this is a single transaction that takes hours, holds row locks the whole time, generates a vacuum nightmare, and if you cancel it you wait the same number of hours for the rollback. Do not do this. The batched version:</p>
+<pre><code class="hljs language-python">BATCH = 5_000
+last_id = 0
+
+while True:
+    rows = db.execute(&quot;&quot;&quot;
+        WITH batch AS (
+          SELECT id FROM transactions
+           WHERE id &gt; %s AND amount_value IS NULL
+           ORDER BY id
+           LIMIT %s
+           FOR UPDATE SKIP LOCKED
+        )
+        UPDATE transactions t
+           SET amount_value = t.amount_cents,
+               amount_currency = &#39;USD&#39;,
+               amount_scale = 2
+          FROM batch
+         WHERE t.id = batch.id
+        RETURNING t.id
+    &quot;&quot;&quot;, (last_id, BATCH))
+
+    if not rows:
+        break
+    last_id = max(r.id for r in rows)
+    time.sleep(0.05)  # pace yourself</code></pre>
+<p>A few things in there are load-bearing.</p>
+<p><code>FOR UPDATE SKIP LOCKED</code> means a row that the live application is currently writing gets skipped, not blocked on. You will pick it up on a later pass once <code>WHERE amount_value IS NULL</code> catches it again. Without <code>SKIP LOCKED</code>, you have built a beautiful denial-of-service on your own write traffic.</p>
+<p>The <code>WHERE id &gt; %s</code> keyset is necessary because <code>OFFSET</code> on a 900M-row table is a war crime. Each batch should be cheap: index lookup, 5k row update, commit, done.</p>
+<p>The <code>time.sleep(0.05)</code> is your throttle. It looks dumb until you watch replication lag during a backfill that does not have it. On a primary doing 4k writes per second, a backfill that adds another 100k writes per second of UPDATEs generates WAL faster than a physical-replication standby can apply it, since the standby applies WAL in a single startup process. Recovery prefetch and parallel logical apply exist but neither changes that fundamental serial replay on a streaming-replication follower. Read replicas drift hours behind. Pace the backfill. If your replication lag exceeds some threshold, sleep longer. I have run backfills that auto-tune by reading <code>pg_stat_replication.replay_lag</code> every batch and adjusting the sleep.</p>
+<p>This is where the 36-hour window comes from. Five thousand rows every ~80ms (including the sleep) is about 62k rows per second; 900M / 62k is about four hours of pure work. Once you account for backpressure from replication, contention with live traffic, and the fact that real production has bursts where you should pause entirely, the realistic number is closer to 9x that. ~36 hours is honest.</p>
+<pre><code>                    pri WAL gen
+                       |
+   backfill ===&gt;  WAL  v          replay
+   batches      ───────►  replica ──────►  apps
+       |                     ^
+       └── sleep(t) tuned ───┘
+           on replay_lag</code></pre>
+<p>Idempotency here matters in the schema-state sense: if your runner dies at row 412,003,118, you restart from <code>WHERE amount_value IS NULL</code> and pick up exactly the rows that did not get done. The <code>last_id</code> keyset is just a performance trick; correctness comes from the predicate. This is a different shape of idempotency from the row-level dedup pattern (UNIQUE constraint plus <code>ON CONFLICT DO NOTHING</code> inside the same write transaction) that you reach for in message processing; that one belongs in a separate post on exactly-once delivery.</p>
+<h2>Phase 3: dual-write</h2>
+<p>Deploy the app code that, on every write, sets both <code>amount_cents</code> and the new three-column struct. Reads still use <code>amount_cents</code>. This is where you discover four things in roughly this order:</p>
+<p>One, you have writers you did not know about. The Spark job that recomputes daily rollups. The CSV importer from the finance team. The cron in <code>tools/legacy-fixups/</code> that nobody has touched since 2021. Every one of them writes <code>amount_cents</code> and not the new columns. Each one needs updating, or each one needs a database-level trigger to mirror writes while you find them.</p>
+<p>Two, the trigger approach has its own trap. A <code>BEFORE INSERT OR UPDATE</code> trigger that does <code>NEW.amount_value := NEW.amount_cents; NEW.amount_currency := &#39;USD&#39;; NEW.amount_scale := 2;</code> works fine and adds a few microseconds per row (the exact number depends on the trigger body and hardware; budget for it in load tests rather than trusting a quoted figure (<a href="https://www.postgresql.org/docs/current/plpgsql-trigger.html">postgresql.org/docs/current/plpgsql-trigger.html</a>)), and breaks the day someone wants to write a non-USD value. So the trigger has to be smart: if the new columns are explicitly set, use those; otherwise derive from old. You end up with a small state machine inside a trigger, which is fine but should be deleted in phase 5 and not forgotten.</p>
+<p>Three, the bug where the application sets <code>amount_cents = 1500</code> but forgets to set the currency, and the trigger fills in USD, and now you have charged a Japanese customer 1,500 USD instead of 1,500 JPY. The trigger papers over a coding error you would have caught if writes had simply failed. I prefer the application-side dual-write with the trigger only as a safety net that logs a warning whenever it actually fires, so you can hunt down stragglers without breaking production.</p>
+<p>Four, transactions across the rename. Anything doing <code>UPDATE transactions SET amount_cents = amount_cents + 100</code> (a relative update) needs to do the same arithmetic on <code>amount_value</code>. If you miss one, you get silent drift between the two columns. The end-of-phase audit catches this:</p>
+<pre><code class="hljs language-sql">SELECT count(*) FROM transactions
+ WHERE amount_value IS DISTINCT FROM amount_cents
+    OR amount_currency != &#39;USD&#39;;</code></pre>
+<p>Run this constantly. The number should be small and bounded (rows currently being written) and should drop to zero between bursts. If it grows monotonically, you have a writer you missed. Stop progressing the migration until you find it.</p>
+<p>The audit catches drift, but only after a writer has actually drifted, and it cannot catch a writer that always sets both columns to internally consistent but semantically wrong values (cents vs minor units, for instance). Combine the audit with grep: search the codebase for every reference to <code>amount_cents</code> and confirm each one either also writes the new columns or is on a list of known-dead code paths. The audit and the grep cover different failure modes.</p>
+<h2>Phase 4: cut over reads</h2>
+<p>The reads flip behind a feature flag, per-service, ideally per-endpoint. Not a global flag. You want to flip the low-traffic admin read first, watch it for a day, then the customer dashboard, then the high-QPS API. If anything looks wrong (rows missing, wrong currency, performance regression because you forgot the index), you flip back instantly.</p>
+<p>This is where you finally create the index on the new columns, after the backfill is done so the index build is on stable data:</p>
+<pre><code class="hljs language-sql">CREATE INDEX CONCURRENTLY transactions_currency_value_idx
+    ON transactions (amount_currency, amount_value);</code></pre>
+<p><code>CONCURRENTLY</code> is non-blocking but slow (it scans the table twice and waits for old transactions to finish), and it can fail mid-build leaving an <code>INVALID</code> index that you have to drop and rebuild. Check <code>pg_index.indisvalid</code> after; do not assume success because the statement returned.</p>
+<p>The bail-out plan in phase 4 is simple: flip the flag back. The data is still being dual-written, so the old column is current. This is the cheapest rollback in the whole migration, and you should rehearse it on staging by deliberately flipping back and forth a few times to make sure nothing caches the schema version weirdly.</p>
+<h2>Phase 5: contract</h2>
+<p>This is the phase that feels anticlimactic and is the riskiest one to do quickly. Steps:</p>
+<ol>
+<li>Deploy app code that no longer reads or writes <code>amount_cents</code>.</li>
+<li>Wait at least a full deployment cycle, ideally a week, to be sure no rollback brings back code that needs the column.</li>
+<li>Drop any triggers that touched it.</li>
+<li>Drop the column.</li>
+</ol>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>step</th>
+<th>lock</th>
+<th>duration</th>
+<th>rollback story</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>stop writes</td>
+<td>none</td>
+<td>instant</td>
+<td>redeploy old code, dual-write resumes</td>
+</tr>
+<tr>
+<td>drop trigger</td>
+<td>AccessExclusive briefly</td>
+<td>ms</td>
+<td>recreate trigger</td>
+</tr>
+<tr>
+<td>drop column</td>
+<td>AccessExclusive</td>
+<td>ms (metadata)</td>
+<td>irreversible without restore</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code>ALTER TABLE ... DROP COLUMN</code> on Postgres is a metadata operation: fast, but takes <code>AccessExclusiveLock</code>. Same <code>lock_timeout</code> trick as phase 1.</p>
+<p>The actual storage does not get reclaimed until rows are rewritten (by <code>VACUUM FULL</code>, <code>CLUSTER</code>, or a future <code>pg_repack</code>). On a 900M-row table this is fine; you do not need to reclaim the space immediately. Schedule <code>pg_repack</code> for a quiet weekend if the table size is causing problems for backups.</p>
+<h2>Bailing out mid-migration</h2>
+<p>The point of expand and contract is that every phase is a stable resting state. Translating that into operational reality:</p>
+<ul>
+<li>During phase 1: nothing to bail from, the columns are nullable and unused.</li>
+<li>During phase 2: cancel the backfill runner. The half-filled column is fine; you can resume or abandon. If abandoning, do not skip to phase 5; just leave the columns nullable and unused until you decide what to do.</li>
+<li>During phase 3: deploy back to phase 2 code (single-write to old). The new column will go stale, which is fine because nothing reads it.</li>
+<li>During phase 4: flip the read flag back. Instant.</li>
+<li>During phase 5: this is the one with no easy rollback. Once the column is dropped, restoring it means restoring from backup. So do not enter phase 5 until you are genuinely done.</li>
+</ul>
+<p>The pattern I have seen wedge teams: they treat phases 3 and 4 as a single deploy, dual-write and read-from-new in the same release. Now a rollback puts the app in a state that reads from a column whose data is stale by however long the release has been live. The fix is annoying (rerun a small backfill for the affected window) but the principle is more important: every phase should be deployable, holdable, and rollable independently. If you cannot resist the temptation to combine phases, you are not really doing expand and contract; you are doing a flag day with extra steps.</p>
+<h2>What this costs</h2>
+<p>Honest accounting for the running example: about a week of calendar time. One day for phase 1 plus the audit queries plus a deploy. Two days for phase 2 because the 36-hour backfill needs a babysitter and you will pause it during business hours twice. Two days for phase 3 to chase down all the writers and watch the audit query settle. A day for phase 4 to flip reads incrementally. A day in phase 5 to hold the new state before the drop.</p>
+<p>That is not a fast migration. It is also not the kind of migration that pages you at 3am with a half-renamed column and a stuck application. The slowness is the feature.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

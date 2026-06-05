@@ -1,0 +1,35 @@
+{
+  "kind": "project",
+  "items": [
+    {
+      "slug": "dcauto",
+      "file": "dcauto.md",
+      "title": "DCAuto",
+      "kicker": "SENIOR SDE @ AMD - 2025-PRESENT",
+      "summary": "Firmware CI fabric for MI450 data-center GPUs. Orchestrates deployments and validation across physical test systems, with idempotent self-check-in and fallback-recovery flows.",
+      "tags": ["Python", "Flask", "Celery", "Azure"],
+      "viz": "proj-gpu",
+      "enabled": true
+    },
+    {
+      "slug": "sherlog",
+      "file": "sherlog.md",
+      "title": "Sherlog Holmes",
+      "kicker": "AMD - LLM SYSTEMS",
+      "summary": "Five-stage failure triage for 50,000-line GPU firmware logs. Embeddings plus FAISS search plus LLM root-cause analysis, shipped as Flask APIs and Celery workers over Azure Service Bus and MongoDB, with Teams alerts.",
+      "tags": ["Embeddings", "FAISS", "LLMs", "MongoDB"],
+      "viz": "proj-sherlog",
+      "enabled": true
+    },
+    {
+      "slug": "qsc",
+      "file": "qsc.md",
+      "title": "Qualcomm Software Center",
+      "kicker": "SOFTWARE ENGINEER @ QUALCOMM - 2022-2025",
+      "summary": "Electron app delivering drivers to global OEMs in Node, Angular, and TypeScript. Shipped the first macOS universal build (Intel and Apple Silicon); automated Jenkins and AWS CI/CD to cut release times by 50%.",
+      "tags": ["TypeScript", "Electron", "Angular", "AWS"],
+      "viz": "proj-dcauto",
+      "enabled": true
+    }
+  ]
+}

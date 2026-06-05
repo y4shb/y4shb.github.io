@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sherlog Holmes - Yash Bhardwaj</title>
+<meta name="description" content="Five-stage failure triage for 50,000-line GPU firmware logs. Embeddings plus FAISS search plus LLM root-cause analysis, shipped as Flask APIs and Celery workers over Azure Service Bus and MongoDB, wit">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/project/sherlog.html">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Sherlog Holmes - Yash Bhardwaj">
+<meta property="og:description" content="Five-stage failure triage for 50,000-line GPU firmware logs. Embeddings plus FAISS search plus LLM root-cause analysis, shipped as Flask APIs and Celery workers over Azure Service Bus and MongoDB, wit">
+<meta property="og:url" content="https://y4shbhardwaj.com/project/sherlog.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Sherlog Holmes - Yash Bhardwaj">
+<meta name="twitter:description" content="Five-stage failure triage for 50,000-line GPU firmware logs. Embeddings plus FAISS search plus LLM root-cause analysis, shipped as Flask APIs and Celery workers over Azure Service Bus and MongoDB, wit">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"CreativeWork","headline":"Sherlog Holmes","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/project/sherlog.html"},"url":"https://y4shbhardwaj.com/project/sherlog.html","description":"Five-stage failure triage for 50,000-line GPU firmware logs. Embeddings plus FAISS search plus LLM root-cause analysis, shipped as Flask APIs and Celery workers over Azure Service Bus and MongoDB, wit","keywords":"Embeddings, FAISS, LLMs, MongoDB"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--project">project</span><div class="meta-tags" aria-label="Tags"><span class="chip">Embeddings</span><span class="chip">FAISS</span><span class="chip">LLMs</span><span class="chip">MongoDB</span></div></div><div class="meta-bottom"><span class="meta-read">4 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-kicker">AMD - LLM SYSTEMS</span></div></div><div id="content" data-prebaked="1"><h1>Sherlog Holmes</h1>
+<p><em>An LLM triage assistant for the 50,000-line logs that GPU firmware validation produces.</em></p>
+<p>The firmware validation team I work with produces a lot of logs. A single failing run on one GPU board can drop a 50,000-line text file into the artifact store, and on a bad day there are dozens of them. The signal is in there somewhere. Usually it is one line, sometimes a small cluster of lines, often buried under thousands of lines of perfectly normal driver chatter that just happen to have scary words like &quot;error&quot; or &quot;timeout&quot; in them. The work of triage is finding that one line and writing a sentence about it that a human firmware engineer can act on.</p>
+<p>Sherlog Holmes is the system I built to do that work. The name was a joke that stuck. It runs as a small service inside the same platform that schedules the validation runs, picks up failed runs from a queue, and posts a triage summary back to the firmware team channel a few minutes after the failure lands.</p>
+<h2>Why a flat LLM call did not work</h2>
+<p>The first version was the obvious one. Take the log, stuff it into a large-context model, ask &quot;what failed and why.&quot; It was bad. The model would happily explain the contents of any random log line, regardless of whether that line had anything to do with the actual failure. Half the time the cited line was not even from the failing window. When the context did not fit, the truncation strategy dictated the answer, which is a polite way of saying the answer was arbitrary.</p>
+<p>The fix was to stop pretending the LLM could do the whole job, and to give it less work to do.</p>
+<h2>The five stages</h2>
+<p>The pipeline is five stages, and each one narrows what the next stage looks at.</p>
+<p>The first stage is structural. Validation logs have a known shape: a header, the suite that ran, the boot sequence, the test cases in order, and a trailer. A small parser cuts the log into those sections so later stages can target the part that actually contains the failure rather than the boot noise above it.</p>
+<p>The second stage is anchor finding. There are a few hundred known signature lines that the firmware team has accumulated over the years: kernel panic markers, specific error codes, a handful of regex patterns for the messages that mean &quot;the test harness gave up.&quot; A scan over the failure window pulls anchors out of the noise and gives the next stage a much smaller window to chew on.</p>
+<p>The third stage is retrieval. The validation suite has a backlog of past failures, each tagged with the root cause that the engineer eventually wrote down. I embed those failures with a small sentence-transformer model, store the vectors in FAISS, and at triage time embed the current failure window and pull the closest matches. About half the time the failure is a near-duplicate of something the team has already seen, and the retrieved example is more useful than anything an LLM can synthesize. The retriever returns five candidates with their original root causes attached.</p>
+<p>The fourth stage is the LLM. By now the prompt is small: the failing section of the log, the anchors that were hit, the retrieved past failures with their root causes, and a tight instruction to either pick one of the retrieved causes if it fits, or to write a new one in the same style. The model is doing pattern matching over a short, well-formatted context. It is fast, it is cheap, and it is hard to get wrong.</p>
+<p>The fifth stage is the writeup. The output goes through a small formatter that turns the model&#39;s answer into a Teams card with the cited log lines, the closest past failure, and a link back to the artifact in the platform. That is what the firmware engineer actually sees.</p>
+<h2>The boring parts that mattered</h2>
+<p>The architecture is unsexy. A few Flask endpoints in front of Celery workers. Azure Service Bus as the queue so the platform team did not have to operate yet another broker. MongoDB for the failure store, because it was already there and the documents are awkwardly shaped. FAISS in-process per worker, with the index rebuilt nightly from the document store. The model calls go through a small gateway with caching, retry, and a circuit breaker, so a bad afternoon at the provider does not take the triage queue down.</p>
+<p>The thing that made it useful in practice was idempotency. A given failure has a stable id derived from the run, so re-running triage on the same failure produces the same Teams card, in place. That meant the engineers on the firmware side could trust the card. If they wanted a fresh look they could ask, and the system would re-triage; otherwise the answer was stable, citable, and linked to its sources.</p>
+<h2>What shipped</h2>
+<p>The firmware team uses it daily. The triage cards show up a few minutes after a failure, the anchors and citations are real, and the retrieved past failures usually do more work than the LLM does. The model is the smallest part of the system, which is the right shape for it.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

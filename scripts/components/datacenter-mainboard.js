@@ -14,7 +14,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 // banks (DrMOS rows + chokes + bulk caps), large power connectors, a board edge
 // connector and board-to-board connectors, and a fine network of copper traces with a
 // subtle traveling-light "electricity" pulse flowing along them. Original representation
-// of the generic data-center GPU baseboard hardware class — no logos, wordmarks, model
+// of the generic data-center GPU baseboard hardware class: no logos, wordmarks, model
 // numbers, or proprietary trade dress; any silk/etch is generic and invented.
 // Cursor orbits/tilts the board and quickens the trace pulses; scroll rotates it on touch.
 // Self-contained init(mount,ctx) -> {start,stop,dispose}; on-demand RAF,
@@ -24,11 +24,11 @@ const OXIDE = '#d64545';
 const lerp = (a, b, t) => a + (b - a) * t;
 
 // Merged cinematic grade (one full-screen pass, linear space, BEFORE OutputPass so ACES
-// stays the single tone-map/colorspace step — no double tone-mapping). Folds four product-shot
+// stays the single tone-map/colorspace step, no double tone-mapping). Folds four product-shot
 // effects into one pass to avoid per-pass render-target bandwidth:
 //   - chromatic aberration: scales with radius^2 so the centre stays razor-sharp and only the
 //     corners fringe, exactly how a real lens behaves (cheap glitch look avoided).
-//   - subtle radial defocus: a faint screen-space blur that ramps in at the edges only — fakes a
+//   - subtle radial defocus: a faint screen-space blur that ramps in at the edges only, fakes a
 //     shallow product-shot focal plane (crisp centre, soft corners) at ~0 cost vs a real BokehPass
 //     depth prepass, which the small-card budget can't spare.
 //   - vignette: soft round corner darkening, floored so corners never crush to black.
@@ -96,7 +96,7 @@ export default function init(mount, ctx) {
 
   const pmrem = new THREE.PMREMGenerator(renderer);
   // crisper IBL: low blur (0.02) keeps tight specular streaks on the brushed-metal heatsinks +
-  // connector pins, which a dark scene leans on for shape — IBL is baked once, sharper costs nothing.
+  // connector pins, which a dark scene leans on for shape; IBL is baked once, sharper costs nothing.
   let envTex = pmrem.fromScene(new RoomEnvironment(), 0.02).texture;
   scene.environment = envTex;
 
@@ -155,7 +155,7 @@ export default function init(mount, ctx) {
       x.fillStyle = 'rgba(150,110,55,0.26)'; x.beginPath(); x.arc(vx, vy, r, 0, 7); x.fill();
       x.fillStyle = 'rgba(5,9,7,0.9)'; x.beginPath(); x.arc(vx, vy, r * 0.45, 0, 7); x.fill();
     }
-    // silkscreen refs — generic invented part designators only (NO branding/model numbers)
+    // silkscreen refs: generic invented part designators only (NO branding/model numbers)
     x.fillStyle = 'rgba(186,196,192,0.46)'; x.font = '12px monospace';
     const refs = ['U7', 'L12', 'C84', 'Q3', 'R210', 'PH1', 'PH6', 'TP4', 'J9', 'VR2', 'FB3', 'D5'];
     for (let i = 0; i < 44; i++) x.fillText(refs[(rng() * refs.length) | 0], rng() * size, rng() * size);
@@ -182,7 +182,7 @@ export default function init(mount, ctx) {
     const t = new THREE.CanvasTexture(c);
     t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(4, 4);
     t.anisotropy = MAX_ANISO; t.needsUpdate = true;
-    // leave colorSpace default (LinearSRGB) — this is a data map
+    // leave colorSpace default (LinearSRGB): this is a data map
     return track(t);
   }
   // soft radial contact-shadow blob (grounds the board against the dark stage; static, zero
@@ -233,7 +233,7 @@ export default function init(mount, ctx) {
   const pinMat = new THREE.MeshPhysicalMaterial({ color: 0xb9bcc1, metalness: 1.0, roughness: 0.42, anisotropy: 0, envMapIntensity: 0.5 }); // tin/nickel connector pins
   // sparing gold: edge-connector contact fingers + a few decoupling accents (used very sparingly)
   const goldAccent = new THREE.MeshPhysicalMaterial({ color: 0xc89a52, metalness: 1.0, roughness: 0.5, anisotropy: 0, envMapIntensity: 0.45 });
-  // tiny status LED (the one non-trace oxide accent) — emissive, blooms faintly
+  // tiny status LED (the one non-trace oxide accent): emissive, blooms faintly
   const ledMat = new THREE.MeshStandardMaterial({ color: 0x2a0c0c, emissive: new THREE.Color(OXIDE), emissiveIntensity: 2.2, roughness: 0.4, metalness: 0 });
   [pcbMat, heatsinkMat, lidMat, screwMat, sockMat, backMat,
    mosMat, chokeMat, capBodyMat, capTopMat, plasticMat, pinMat, goldAccent, ledMat].forEach(track);
@@ -280,7 +280,7 @@ export default function init(mount, ctx) {
 
   // finned heatsink on top of the lid: a solid base slab (one InstancedMesh across sites) plus a
   // separate InstancedMesh of thin fin slabs (FINS_PER per site) riding on the base. Two draw calls
-  // total for every heatsink on the board — the grid of finned sinks is the hero read of the mainboard.
+  // total for every heatsink on the board; the grid of finned sinks is the hero read of the mainboard.
   const sinkBaseGeo = track(new RoundedBoxGeometry(siteW * 0.78, 0.10, siteD * 0.78, 2, 0.03));
   const sinkY = lidY + 0.10;
   const sinkInst = new THREE.InstancedMesh(sinkBaseGeo, heatsinkMat, sites.length);
@@ -434,12 +434,12 @@ export default function init(mount, ctx) {
   // (fract UV-scroll pulse, additive, bloom does the glow) on thin TubeGeometry along CatmullRom
   // paths just above the solder mask. Several short routes are merged-by-instance: each route is its
   // own tube mesh sharing ONE shader material, so all pulses animate from a single uTime/uSpeed.
-  // Cool electric tone on the dark board; faint — it is an accent flowing through the traces, not glow.
+  // Cool electric tone on the dark board; faint: it is an accent flowing through the traces, not glow.
   const traceY = pcbH + 0.012;             // hair above the mask so the pulse reads as on-board
   const traceMat = track(new THREE.ShaderMaterial({
     uniforms: {
-      uTime: { value: 0 }, uSpeed: { value: 0.18 },        // slow base glide — current eases along, never races
-      uColor: { value: new THREE.Color(0x59c6ff) },        // cool electric blue — premium on dark, oxide stays the LED's
+      uTime: { value: 0 }, uSpeed: { value: 0.18 },        // slow base glide, current eases along, never races
+      uColor: { value: new THREE.Color(0x59c6ff) },        // cool electric blue: reads on dark, LED keeps the oxide accent
       uHot: { value: new THREE.Color(0xddf1ff) },          // hotter leading-edge spark
     },
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
@@ -447,7 +447,7 @@ export default function init(mount, ctx) {
     fragmentShader: [
       'uniform float uTime; uniform float uSpeed; uniform vec3 uColor; uniform vec3 uHot; varying vec2 vUv;',
       'void main(){',
-      '  float n = 2.0;',                                   // SPARSE — 2 pulses per route, occasional not streaming
+      '  float n = 2.0;',                                   // SPARSE: 2 pulses per route, occasional not streaming
       '  float f = fract(vUv.x * n - uTime * uSpeed);',
       '  float head = smoothstep(0.0, 0.05, f);',           // sharp leading edge
       '  float tail = 1.0 - smoothstep(0.05, 0.55, f);',    // long fade tail → a comet of current, not a band
@@ -522,7 +522,7 @@ export default function init(mount, ctx) {
     composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(w, h, { samples: 4 }));
     composer.addPass(new RenderPass(scene, camera));
     // GTAO darkens the heatsink fin gaps, the seams where the module sites/connectors/chokes meet
-    // the board, and under the component overhangs — the #1 cue that sells a machined assembly
+    // the board, and under the component overhangs: the #1 cue that sells a machined assembly
     // (PBR metal looks plasticky with no occlusion in the gaps the env map floods). Skip on
     // touch/low-power (noHover) to protect that budget. Goes BEFORE bloom so occluded areas don't bloom.
     if (!noHover) {
@@ -530,7 +530,7 @@ export default function init(mount, ctx) {
       gtao.output = GTAOPass.OUTPUT.Default;   // beauty * denoised AO (ship this; .AO/.Denoise are debug views)
       gtao.blendIntensity = 0.85;
       gtao.updateGtaoMaterial({
-        radius: 0.35,           // world units — tuned for the fin pitch + component-to-board seams on the wide board
+        radius: 0.35,           // world units, tuned for the fin pitch + component-to-board seams on the wide board
         distanceExponent: 1.0,
         thickness: 0.4,         // thin fins + low components: smaller thickness keeps the AO from over-darkening
         distanceFallOff: 0.6,
@@ -542,7 +542,7 @@ export default function init(mount, ctx) {
       composer.addPass(gtao);
     }
     // With GTAO darkening crevices, keep bloom tight (high threshold) so only the trace-electricity
-    // pulses + the tiny status LED bloom, not the matte metal speculars — the board itself stays dark.
+    // pulses + the tiny status LED bloom, not the matte metal speculars; the board itself stays dark.
     bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.3, 0.45, 0.95);
     composer.addPass(bloom);
     // cinematic grade (vignette + chromatic aberration + edge-defocus + grain), linear space,
@@ -552,7 +552,7 @@ export default function init(mount, ctx) {
     if (reduced) grade.uniforms.uGrain.value = 0;   // no animated grain on the reduced-motion static frame
     composer.addPass(grade);
     // SMAA: the composer bypasses the renderer's MSAA, so fin/pin/finger/trace edges alias on the
-    // offscreen target once GTAO/bloom run — SMAA restores clean edges cheaply (one pass).
+    // offscreen target once GTAO/bloom run; SMAA restores clean edges cheaply (one pass).
     smaa = new SMAAPass(w, h);
     composer.addPass(smaa);
     output = new OutputPass();            // ACES tone-map + sRGB, always last (single tone-map step)
@@ -587,14 +587,14 @@ export default function init(mount, ctx) {
       dragYaw += dx * 0.01;
       dragPitch = Math.max(-0.5, Math.min(0.5, dragPitch + dy * 0.006));
       vel = dx * 0.01;
-      flowTarget = 0.5; bloomTarget = 1; lastInput = performance.now();
+      flowTarget = 0.5; bloomTarget = 1;
       ensure();
       return;
     }
     const r = mount.getBoundingClientRect();
     tx = ((e.clientX - r.left) / r.width) * 2 - 1;
     ty = ((e.clientY - r.top) / r.height) * 2 - 1;
-    flowTarget = 0.5; bloomTarget = 1; lastInput = performance.now();
+    flowTarget = 0.5; bloomTarget = 1;
     ensure();
   }
   function onLeave() { if (!dragging) { tx = 0; ty = 0; flowTarget = 0.18; bloomTarget = 0; ensure(); } }
@@ -609,7 +609,7 @@ export default function init(mount, ctx) {
     dragging = false;
     renderer.domElement.style.cursor = 'grab';
     try { mount.releasePointerCapture(e.pointerId); } catch (_) {}
-    lastInput = performance.now(); ensure();
+    ensure();
   }
   let scrollRaf = 0;
   function onScroll() {
@@ -620,7 +620,6 @@ export default function init(mount, ctx) {
       const prog = 1 - (r.top + r.height / 2) / (window.innerHeight + r.height);
       scrollSpin = (prog - 0.5) * 2.2;
       if (noHover) { flowTarget = 0.42; bloomTarget = 0.7; }
-      lastInput = performance.now();
       ensure();
     });
   }
@@ -639,7 +638,7 @@ export default function init(mount, ctx) {
     composer.render();
   }
 
-  let raf = 0, running = false, active = false, last = 0, lastInput = 0, disposed = false;
+  let raf = 0, running = false, active = false, last = 0, disposed = false;
   function tick(now) {
     if (!running || disposed) return;
     const dt = Math.min(0.05, (now - last) / 1000); last = now;
@@ -660,7 +659,9 @@ export default function init(mount, ctx) {
   const onLost = e => { e.preventDefault(); running = false; if (raf) cancelAnimationFrame(raf); raf = 0; };
   const onRestored = () => {
     const old = envTex; envTex = pmrem.fromScene(new RoomEnvironment(), 0.02).texture; scene.environment = envTex; if (old) old.dispose();
-    composer = null; gtao = null; grade = null; smaa = null; output = null; size();
+    if (composer) { composer.renderTarget1?.dispose(); composer.renderTarget2?.dispose(); }
+    gtao?.dispose?.(); bloom?.dispose?.(); grade?.dispose?.(); smaa?.dispose?.(); output?.dispose?.();
+    composer = null; gtao = null; bloom = null; grade = null; smaa = null; output = null; size();
     if (reduced) frame(); else if (active) ensure();
   };
   renderer.domElement.addEventListener('webglcontextlost', onLost, false);

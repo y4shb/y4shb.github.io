@@ -1,0 +1,449 @@
+/* content.css
+   Two responsibilities:
+   1. Long-form reading styles for /article.html and /project.html.
+      Both pages reuse one stylesheet.
+   2. Home-page Articles section: dense reverse-chronological list.
+   Mobile responsive at 640px. */
+
+
+/* ---------- 1. detail page: long-form reading ---------- */
+
+/* page chrome */
+.reader-body { padding-top: var(--nav-h); -webkit-font-smoothing: antialiased; }
+
+#progress {
+  position: fixed; top: 0; left: 0; height: 2px;
+  background: var(--accent); z-index: 100; width: 0%;
+  box-shadow: 0 0 8px rgba(214, 69, 69, 0.5);
+  transition: width 80ms linear;
+}
+
+.blog-wrap {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 56px clamp(20px, 5vw, 48px) 120px;
+  min-width: 0;
+}
+/* Block children of the reading column may not exceed the column width.
+   Without this, a content-driven table or wide inline token can push the
+   block formatting context past the wrap and inflate docWidth past viewport. */
+.blog-wrap > * { max-width: 100%; min-width: 0; }
+
+/* title + italic subtitle (first em paragraph after H1) */
+.blog h1 {
+  font-family: var(--font-sans);
+  font-size: clamp(34px, 5.6vw, 56px);
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 1.06;
+  color: var(--text);
+  margin: 0 0 18px;
+}
+.blog > p:first-of-type em:only-child {
+  display: block;
+  font-style: italic; font-weight: 400;
+  color: var(--muted);
+  font-size: clamp(17px, 1.9vw, 21px);
+  line-height: 1.5;
+  margin: 0 0 56px;
+  padding-bottom: 36px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* headings */
+.blog h2 {
+  font-family: var(--font-sans);
+  font-size: clamp(22px, 2.4vw, 27px);
+  font-weight: 600; letter-spacing: -0.014em;
+  color: var(--text); line-height: 1.25;
+  margin: 64px 0 20px;
+}
+.blog h2::before {
+  content: "// ";
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.66em;
+  font-weight: 500;
+  vertical-align: 0.18em;
+  opacity: 0.9;
+  letter-spacing: 0.05em;
+}
+.blog h3 {
+  font-family: var(--font-sans);
+  font-size: 17px; font-weight: 600;
+  color: var(--text);
+  margin: 40px 0 12px;
+  letter-spacing: -0.005em;
+}
+
+/* body prose */
+.blog p, .blog li {
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 1.72;
+  color: #d4d4d6;
+  margin: 0 0 22px;
+}
+.blog ul, .blog ol { margin: 0 0 24px; padding-left: 22px; }
+.blog li { margin-bottom: 8px; }
+.blog li::marker { color: var(--faint); }
+.blog strong { font-weight: 600; color: var(--text); }
+.blog em { font-style: italic; }
+.blog a {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  transition: color 0.18s, text-decoration-color 0.18s;
+  /* Bare-URL link text is one unbreakable token (~400px) without this; it would
+     burst narrow viewports. `anywhere` only kicks in when needed, so desktop
+     reading flow is unaffected. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.blog a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+
+/* inline code: subtle pill, slight oxide tint */
+.blog :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: #1a1a1d;
+  color: #e8d4d4;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+/* code blocks: dark surface, thin accent rule on left */
+.blog pre {
+  background: #0d0d0f;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 8px;
+  padding: 18px 22px;
+  overflow-x: auto;
+  margin: 0 0 28px;
+  line-height: 1.55;
+  min-width: 0;
+  word-break: normal;
+}
+.blog pre code.hljs {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  background: none !important;
+  padding: 0;
+  color: #d4d4d6;
+}
+
+/* trim default hljs palette to match site oxide tone */
+.hljs-keyword, .hljs-built_in, .hljs-meta { color: #e8a4a4; }
+.hljs-string { color: #bcd8c2; }
+.hljs-number, .hljs-literal { color: #d2b48c; }
+.hljs-comment { color: #6e7079; font-style: italic; }
+.hljs-title, .hljs-function .hljs-title, .hljs-attr, .hljs-name { color: #e5e5e7; }
+.hljs-type, .hljs-class .hljs-title { color: #d8c0a0; }
+
+/* tables: borderless except for thin row separators */
+.blog table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 32px;
+  font-size: 14.5px;
+  font-family: var(--font-sans);
+}
+.blog .table-wrap {
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  margin: 0 0 32px;
+}
+.blog .table-wrap > table {
+  margin-bottom: 0;
+}
+.blog thead { border-bottom: 1px solid var(--border-hover); }
+.blog th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text);
+  padding: 12px 12px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+.blog td {
+  padding: 12px 12px;
+  border-bottom: 1px solid var(--border);
+  color: #cfcfd1;
+  vertical-align: top;
+  line-height: 1.55;
+}
+.blog td code, .blog th code { font-size: 12.5px; padding: 1px 6px; }
+
+.blog blockquote {
+  border-left: 2px solid var(--accent);
+  padding: 4px 0 4px 20px;
+  margin: 0 0 26px;
+  color: var(--muted);
+  font-style: italic;
+}
+.blog hr { border: none; border-top: 1px solid var(--border); margin: 56px 0; }
+
+/* mermaid block */
+.blog .mermaid {
+  margin: 0 0 32px;
+  padding: 28px 20px 22px;
+  background: #0d0d0f;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-align: center;
+  overflow-x: auto;
+}
+.blog .mermaid svg { max-width: 100%; height: auto; }
+
+/* loading + error states */
+.loading {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 80px 0;
+  text-align: center;
+}
+.reader-404 {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 120px clamp(20px, 5vw, 48px);
+  text-align: center;
+}
+.reader-404 h1 {
+  font-family: var(--font-sans);
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin: 0 0 12px;
+}
+.reader-404 p {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  margin: 0 0 32px;
+}
+.reader-404 a {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  padding: 10px 18px;
+  border-radius: 4px;
+  transition: color 0.18s, border-color 0.18s;
+}
+.reader-404 a:hover { color: var(--accent); border-color: var(--accent); }
+
+
+/* ---------- 1b. detail-page meta strip ---------- */
+/* Two stacked rows: a typed pill + date/kicker + reading time on top
+   (word count right-aligned), and a tag chip row below. */
+.blog-meta { margin: 0 0 40px; }
+
+/* Two-row meta strip: top row = typed pill + tag chips; bottom row = reading
+   time + date (articles) or kicker (projects). No word count, ever. */
+.meta-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.meta-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 5px 10px 4px;
+  border-radius: 3px;
+  color: #0a0a0a;
+  background: var(--accent);
+  line-height: 1;
+  flex: none;
+}
+
+/* Tags now live inline next to the pill instead of in a row below. */
+.meta-tags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.meta-tags .chip {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 9px;
+  transition: color 0.18s ease, border-color 0.18s ease;
+}
+.meta-tags .chip:hover { color: var(--text); border-color: var(--border-hover, var(--accent)); }
+
+.meta-bottom {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.meta-date, .meta-kicker { color: var(--muted); }
+.meta-read { color: var(--faint); }
+.meta-dot { color: var(--border); }
+
+/* ---------- 2. home-page Articles section list ---------- */
+
+/* Breathing room between Articles and the Tinkering block below. */
+.articles, #articles { margin-bottom: 72px; }
+
+.articles-list {
+  list-style: none;
+  margin: 24px 0 0;
+  padding: 0;
+  /* Cap the list at ~4.5 rows so the cut row hints at more below.
+     Smooth user-scroll, faded bottom edge, thin oxide-on-hover scrollbar. */
+  max-height: 380px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 44px), transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 44px), transparent 100%);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  scrollbar-gutter: stable;
+}
+.articles-list::-webkit-scrollbar { width: 6px; }
+.articles-list::-webkit-scrollbar-track { background: transparent; }
+.articles-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.articles-list:hover::-webkit-scrollbar-thumb { background: var(--accent); }
+
+.article-row {
+  display: grid;
+  grid-template-columns: 96px 1fr auto;
+  gap: 24px;
+  align-items: baseline;
+  padding: 20px 4px;
+  border-bottom: 1px solid var(--border);
+  text-decoration: none;
+  color: var(--text);
+  transition: color 0.18s, border-color 0.18s, background 0.18s;
+}
+.article-row:hover {
+  border-bottom-color: var(--accent);
+  background: linear-gradient(180deg, rgba(214, 69, 69, 0.03), transparent);
+}
+.article-row:hover .article-row-title { color: var(--accent); }
+.article-row:hover .article-row-date { color: var(--muted); }
+
+.article-row-date {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+  transition: color 0.18s;
+}
+
+.article-row-main { min-width: 0; }
+
+.article-row-title {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  line-height: 1.35;
+  color: var(--text);
+  margin: 0;
+  transition: color 0.18s;
+}
+
+.article-row-sub {
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 4px 0 0;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+}
+
+.article-row-tags {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: lowercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* projects: clickable wrapper around tier-1 cards.
+   Strip default link styles; let inner .proj-card handle its own visuals. */
+.proj-card-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border-radius: inherit;
+}
+.proj-card-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
+
+/* ---------- mobile ---------- */
+
+@media (max-width: 640px) {
+  .blog h1 { font-size: 32px; line-height: 1.1; }
+  .blog p, .blog li { font-size: 16px; }
+  .blog pre { padding: 14px 16px; }
+  .blog pre code.hljs { font-size: 12.5px; }
+  .blog table { font-size: 13px; }
+
+  /* Inline-code pills carry white-space:nowrap to keep short tokens intact, but
+     long technical strings (paths, IDs, URLs) become unbreakable and push the
+     prose past the viewport. Allow wrap mid-token at narrow widths only. */
+  .blog :not(pre) > code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .article-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+    padding: 18px 2px;
+  }
+  .article-row-date {
+    order: -1;
+    font-size: 10.5px;
+  }
+  .article-row-tags {
+    font-size: 10.5px;
+  }
+}
+
+@media (max-width: 360px) {
+  .blog h1 { font-size: 27px; line-height: 1.05; }
+}

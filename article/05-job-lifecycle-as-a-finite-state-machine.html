@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modeling job lifecycle as a finite state machine - Yash Bhardwaj</title>
+<meta name="description" content="the cheapest reliability upgrade your job runner will ever get">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/05-job-lifecycle-as-a-finite-state-machine.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Modeling job lifecycle as a finite state machine - Yash Bhardwaj">
+<meta property="og:description" content="the cheapest reliability upgrade your job runner will ever get">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/05-job-lifecycle-as-a-finite-state-machine.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Modeling job lifecycle as a finite state machine - Yash Bhardwaj">
+<meta name="twitter:description" content="the cheapest reliability upgrade your job runner will ever get">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Modeling job lifecycle as a finite state machine","datePublished":"2025-12-08","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/05-job-lifecycle-as-a-finite-state-machine.html"},"url":"https://y4shbhardwaj.com/article/05-job-lifecycle-as-a-finite-state-machine.html","description":"the cheapest reliability upgrade your job runner will ever get","keywords":"jobs, state-machines"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">jobs</span><span class="chip">state-machines</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Dec 8, 2025</span></div></div><div id="content" data-prebaked="1"><h1>Modeling job lifecycle as a finite state machine</h1>
+<p><em>the cheapest reliability upgrade your job runner will ever get</em></p>
+<pre><code class="hljs language-python">from dataclasses import dataclass
+
+@dataclass
+class Job:
+    is_queued: bool = True
+    is_claimed: bool = False
+    is_running: bool = False
+    is_done: bool = False
+    is_failed: bool = False
+    is_paused: bool = False
+    is_abandoned: bool = False</code></pre>
+<p>Seven booleans means 128 possible combinations. How many are legal? Maybe seven. The other 121 are bugs waiting for the right race condition. And somewhere in the codebase, there is a comment that says <code># TODO: figure out what to do when paused and failed both true</code>. That comment is the bug. Actually it is dozens of bugs hiding behind one TODO.</p>
+<p>The fix is not better naming. Stop modelling job lifecycle as a bag of booleans; model it as a finite state machine. Once you write that down explicitly, a huge category of bugs becomes impossible to express in the first place, and the rest become trivial to find because they show up as illegal transitions in your logs.</p>
+<p>This post walks through how I model job lifecycle in a generic work runner I will call <code>relayd</code>. The same shape works for any system that picks work off a queue, runs it on a worker, and reports back.</p>
+<h2>Why the boolean soup always loses</h2>
+<p>The usual answer to &quot;is <code>is_paused</code> allowed while <code>is_failed</code>?&quot; is &quot;make up the most plausible status and move on.&quot; It works for six months, until a user notices that their &quot;completed&quot; job had also produced a partial result that was still being retried, and the support escalation takes three days to unwind because nobody can tell what state the job had actually been in at any point.</p>
+<h2>States, in plain English</h2>
+<p>A job in <code>relayd</code> lives in exactly one of seven states:</p>
+<pre><code>queued        # accepted, waiting for a worker
+claimed       # a worker has reserved it but not started
+running       # actively executing
+paused        # operator or supervisor halted it, can resume
+completed     # finished with a verdict (pass or fail of the test, not the job)
+failed        # the job itself errored: worker crash, infra fault, timeout
+abandoned     # we gave up; no further work, no retry, sweep me up</code></pre>
+<p>Two things to call out. First, <code>completed</code> is about the job machinery, not the test result. A regression that found a bug and reported a clean failure is <code>completed</code>. A regression where the worker process segfaulted is <code>failed</code>. Concretely: <code>pytest</code> exits with code 1 after finding a real regression, that is <code>completed</code> (verdict: test failed). The <code>pytest</code> process gets OOM-killed by the kernel halfway through collection, that is <code>failed</code> (the job machinery broke, we never got a verdict). Conflating these is the single most common modeling error I see, and it leaks into dashboards forever once it does.</p>
+<p>Second, <code>abandoned</code> is distinct from <code>failed</code>. <code>failed</code> is recoverable in principle. <code>abandoned</code> is the supervisor&#39;s verdict that we are done retrying, done caring, and the job is now garbage to be collected.</p>
+<h2>Drawing the transitions</h2>
+<p>Here is the legal transition graph. Every arrow is a verb. The diagram below is a sketch to anchor your intuition; the transition table that follows is the authoritative source, and if they disagree, trust the table.</p>
+<pre class="mermaid">stateDiagram-v2
+    [*] --&gt; queued: submit
+    queued --&gt; claimed: claim
+    claimed --&gt; running: start
+    claimed --&gt; queued: reclaim
+    running --&gt; completed: finish
+    running --&gt; failed: error
+    running --&gt; paused: pause
+    running --&gt; queued: reclaim
+    paused --&gt; running: resume
+    paused --&gt; abandoned: abandon
+    failed --&gt; queued: retry
+    failed --&gt; abandoned: abandon
+    completed --&gt; [*]
+    abandoned --&gt; [*]</pre>
+<p>The terminal states are <code>completed</code> and <code>abandoned</code>. Once a job lands there, no event can move it.</p>
+<p>That property is doing a lot of work for you: it means your billing code, your archiver, and your metrics rollup can all trust those rows without holding a lock.</p>
+<p>The transitions, written as <code>(from, event) -&gt; to</code>:</p>
+<pre><code>(queued,    claim)   -&gt; claimed
+(claimed,   start)   -&gt; running
+(claimed,   reclaim) -&gt; queued      # worker died before start
+(running,   finish)  -&gt; completed
+(running,   error)   -&gt; failed
+(running,   pause)   -&gt; paused
+(paused,    resume)  -&gt; running
+(paused,   abandon)  -&gt; abandoned
+(running,  reclaim)  -&gt; queued      # worker died mid-run
+(failed,    retry)   -&gt; queued
+(failed,   abandon)  -&gt; abandoned</code></pre>
+<p>That is it. Eleven transitions. Anything else (a <code>resume</code> event on a <code>completed</code> job, a <code>start</code> on a <code>queued</code> job that skipped <code>claimed</code>, a <code>finish</code> on a <code>paused</code>) is a bug, and your transition function should refuse it loudly.</p>
+<p>One deliberate restriction worth calling out: a <code>paused</code> job cannot directly <code>finish</code> or <code>error</code>. It must be resumed first. The reasoning is that &quot;paused&quot; means the worker is not executing right now, so it cannot have a fresh result to report. To dispose of a paused job without resuming it, use <code>abandon</code>. If your domain genuinely needs <code>(paused, finish) -&gt; completed</code> (for example, an operator wants to mark partial work as done), add it explicitly to the table rather than letting it sneak in via a workaround.</p>
+<h2>The state table, in code</h2>
+<p>The whole machine fits in about thirty lines of Python. Here is the version I actually run, give or take the logging.</p>
+<pre><code class="hljs language-python">from dataclasses import dataclass
+from enum import Enum
+
+class State(Enum):
+    QUEUED    = &quot;queued&quot;
+    CLAIMED   = &quot;claimed&quot;
+    RUNNING   = &quot;running&quot;
+    PAUSED    = &quot;paused&quot;
+    COMPLETED = &quot;completed&quot;
+    FAILED    = &quot;failed&quot;
+    ABANDONED = &quot;abandoned&quot;
+
+class Event(Enum):
+    CLAIM   = &quot;claim&quot;
+    START   = &quot;start&quot;
+    FINISH  = &quot;finish&quot;
+    ERROR   = &quot;error&quot;
+    PAUSE   = &quot;pause&quot;
+    RESUME  = &quot;resume&quot;
+    RECLAIM = &quot;reclaim&quot;
+    RETRY   = &quot;retry&quot;
+    ABANDON = &quot;abandon&quot;
+
+TRANSITIONS = {
+    (State.QUEUED,    Event.CLAIM):   State.CLAIMED,
+    (State.CLAIMED,   Event.START):   State.RUNNING,
+    (State.CLAIMED,   Event.RECLAIM): State.QUEUED,
+    (State.RUNNING,   Event.FINISH):  State.COMPLETED,
+    (State.RUNNING,   Event.ERROR):   State.FAILED,
+    (State.RUNNING,   Event.PAUSE):   State.PAUSED,
+    (State.RUNNING,   Event.RECLAIM): State.QUEUED,
+    (State.PAUSED,    Event.RESUME):  State.RUNNING,
+    (State.PAUSED,    Event.ABANDON): State.ABANDONED,
+    (State.FAILED,    Event.RETRY):   State.QUEUED,
+    (State.FAILED,    Event.ABANDON): State.ABANDONED,
+}
+
+TERMINAL = {State.COMPLETED, State.ABANDONED}
+
+class IllegalTransition(Exception):
+    pass
+
+@dataclass
+class Job:
+    id: str
+    state: State
+
+    def apply(self, event: Event) -&gt; &quot;Job&quot;:
+        if self.state in TERMINAL:
+            raise IllegalTransition(
+                f&quot;job {self.id} is terminal ({self.state.value}); &quot;
+                f&quot;refusing event {event.value}&quot;
+            )
+        try:
+            new_state = TRANSITIONS[(self.state, event)]
+        except KeyError:
+            raise IllegalTransition(
+                f&quot;job {self.id}: no transition from &quot;
+                f&quot;{self.state.value} on {event.value}&quot;
+            )
+        return Job(id=self.id, state=new_state)</code></pre>
+<p>Four properties of this code are worth calling out.</p>
+<p>The transitions live in a dict, not in a tangle of <code>if</code> statements buried in handler methods. You can <code>pprint</code> the table. You can diff it across releases. You can write a ten-line reachability check that asserts every state is reachable from <code>queued</code>:</p>
+<pre><code class="hljs language-python">def test_every_state_reachable_from_queued():
+    seen = {State.QUEUED}
+    frontier = [State.QUEUED]
+    while frontier:
+        s = frontier.pop()  # DFS order; reachability does not care
+        for (src, _evt), dst in TRANSITIONS.items():
+            if src == s and dst not in seen:
+                seen.add(dst)
+                frontier.append(dst)
+    assert seen == set(State), f&quot;unreachable: {set(State) - seen}&quot;</code></pre>
+<p>That test has caught me twice: once when I added <code>PAUSED</code> and forgot the <code>RESUME</code> edge, and once when a refactor accidentally deleted <code>(FAILED, RETRY) -&gt; QUEUED</code> and orphaned the whole retry path. You can hand the dict to a new hire on their first day and they will understand the system in five minutes. None of that is true of method-scattered logic.</p>
+<p>The <code>apply</code> method returns a new <code>Job</code> rather than mutating. That is not Python dogma, it is because I want the persistence layer to write the new row before the in-memory object reflects the change. If the database write fails, the old object is still valid. With in-place mutation, you have to remember to revert, and you will not always remember.</p>
+<p>The <code>IllegalTransition</code> exception is not a soft warning. It is the loudest possible signal. In production it goes to PagerDuty, because every illegal transition is either a bug in the orchestrator or, more interestingly, evidence that two components disagree about a job&#39;s state. Both deserve a human looking at them.</p>
+<h2>Persisting state so a dead worker does not poison you</h2>
+<p>The state machine is half the story. The other half is making sure the state survives a worker crash, a network partition, or a sloppy redeploy.</p>
+<p>The persistence shape that has worked best for me is brutally boring: a <code>jobs</code> table with the current state, and a <code>job_events</code> append-only log of every transition. The shape has a proper name (event sourcing, see Fowler&#39;s 2005 article at <a href="https://martinfowler.com/eaaDev/EventSourcing.html">https://martinfowler.com/eaaDev/EventSourcing.html</a>) but you do not need the full CQRS vocabulary to use it. Something like:</p>
+<pre><code class="hljs language-sql">CREATE TABLE jobs (
+    id            UUID PRIMARY KEY,
+    state         TEXT NOT NULL,
+    claimed_by    TEXT,
+    claimed_at    TIMESTAMPTZ,
+    heartbeat_at  TIMESTAMPTZ,
+    state_version BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE job_events (
+    id         BIGSERIAL PRIMARY KEY,
+    job_id     UUID NOT NULL REFERENCES jobs(id),
+    from_state TEXT NOT NULL,
+    to_state   TEXT NOT NULL,
+    event      TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    payload    JSONB
+);
+
+-- The supervisor scan that drives reclaim runs every few seconds.
+-- Without this index it is a full-table seq scan on jobs once the
+-- table has a few million rows. With it, the scan touches only
+-- live work.
+CREATE INDEX jobs_live_heartbeat
+    ON jobs (heartbeat_at)
+    WHERE state IN (&#39;claimed&#39;, &#39;running&#39;);</code></pre>
+<p>The <code>state_version</code> column is the optimistic lock that guards FSM transitions specifically. Other parts of the system have their own race-prevention story (the broader &quot;two writers showed up at the same row&quot; pattern is its own topic, see the blog on idempotent inserts), but for state transitions, version-per-row is enough. Every transition does:</p>
+<pre><code class="hljs language-sql">UPDATE jobs
+   SET state = $new_state,
+       state_version = state_version + 1,
+       heartbeat_at = now()
+ WHERE id = $job_id
+   AND state_version = $expected_version
+   AND state = $expected_state    -- defense in depth; see note
+RETURNING state_version;</code></pre>
+<p>The <code>state_version</code> check alone is sufficient: if no one else has transitioned the row, the version matches and the state must match. The extra <code>state = $expected_state</code> clause is a defense-in-depth assertion. If it ever causes the <code>UPDATE</code> to fail when the version did match, you have a much worse bug, your state and version have drifted apart somehow, and you want to know about it loudly rather than paper over it. Treat that failure mode as an invariant violation, page on it, and audit the event log.</p>
+<p>If the <code>UPDATE</code> returns zero rows in the normal case (version mismatch), someone else got there first. The PostgreSQL docs spell this out: a WHERE clause that matches no rows is not an error, the RETURNING set is empty, and the command tag reports a count of 0 (<a href="https://www.postgresql.org/docs/current/sql-update.html">https://www.postgresql.org/docs/current/sql-update.html</a>). You re-read the row, decide whether your event is still meaningful, and retry or bail. You do not blindly overwrite. This is the difference between a runner that loses one job a month to a quiet race and one that does not.</p>
+<p>You do not need SERIALIZABLE isolation for this to work. READ COMMITTED is sufficient: if two transactions target the same row, the second <code>UPDATE</code> blocks until the first commits, then re-evaluates its WHERE clause against the freshly-committed row. The version column has been incremented, the predicate fails, zero rows are affected (<a href="https://www.postgresql.org/docs/current/transaction-iso.html">https://www.postgresql.org/docs/current/transaction-iso.html</a>). Note that this re-evaluation under READ COMMITTED is a PostgreSQL guarantee (EvalPlanQual semantics); if you are on a different database, check its READ COMMITTED rules before relying on the same behavior. The row&#39;s version effectively serializes writers without paying for table-wide serializability.</p>
+<p>The event log is not just for forensics, though it is great for that. It is also how you safely answer &quot;what is the longest a job has spent in <code>claimed</code> without progressing to <code>running</code>?&quot; which is the kind of question that makes worker bugs obvious. As a rough mental model for what each state&#39;s dwell-time distribution should look like:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Healthy dwell</th>
+<th>Unhealthy signal</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>queued</code></td>
+<td>seconds to minutes</td>
+<td>hours, with workers idle (scheduler stuck)</td>
+</tr>
+<tr>
+<td><code>claimed</code></td>
+<td>milliseconds</td>
+<td>seconds or longer (worker dying between claim and start)</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td>job-dependent</td>
+<td>exceeds the job&#39;s own timeout (supervisor not reclaiming)</td>
+</tr>
+<tr>
+<td><code>paused</code></td>
+<td>until an operator acts</td>
+<td>indefinite with no owner (forgotten by humans)</td>
+</tr>
+<tr>
+<td><code>completed</code></td>
+<td>terminal, archived</td>
+<td>never archived (sweeper not running)</td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td>until retry or abandon</td>
+<td>indefinite (retry policy never fires)</td>
+</tr>
+<tr>
+<td><code>abandoned</code></td>
+<td>terminal</td>
+<td>growing without bound (no GC)</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>A &quot;few multiples of the heartbeat interval&quot; is the right gut feel for the reclaim threshold on <code>claimed</code> and <code>running</code>. The well-known production defaults all sit in that range: Kubernetes (as of v1.32+) ships a 50-second node-monitor-grace-period on top of a 10-second status-update interval, and Nomad defaults to a 10-second heartbeat grace (<a href="https://kubernetes.io/docs/reference/node/node-status/">https://kubernetes.io/docs/reference/node/node-status/</a>). If you see jobs in <code>claimed</code> for thirty seconds while the heartbeat interval is one second, a worker is dying between claim and start, and you would never have known from the current-state table alone.</p>
+<h2>Reclaim as a first-class transition</h2>
+<p>The FSM makes &quot;reclaim&quot; a legal transition with the same shape as <code>start</code> or <code>finish</code>, so the recovery path is not a special-case branch buried in supervisor code. Whatever physically went wrong (a dead worker box, a stuck lease, a hung process) is somebody else&#39;s problem; the FSM only cares that an event arrived and that the (state, event) pair is in the table.</p>
+<p>A supervisor checks for jobs whose <code>heartbeat_at</code> has aged past a threshold and emits a <code>RECLAIM</code> event through the same <code>apply</code> function as every other transition:</p>
+<pre><code class="hljs language-python">def issue_reclaim(db, job_id):
+    row = db.query_one(&quot;SELECT state, state_version FROM jobs WHERE id = %s&quot;, job_id)
+    job = Job(id=job_id, state=State(row.state))
+    try:
+        new_job = job.apply(Event.RECLAIM)
+    except IllegalTransition:
+        return  # someone else moved it; fine
+    persist_transition(db, job, new_job, row.state_version,
+                       actor=&quot;supervisor&quot;, event=Event.RECLAIM)</code></pre>
+<p>There are three things worth noticing here, and all three follow from treating reclaim as just another FSM event rather than as a special recovery routine.</p>
+<p>First, the supervisor does not need to know why the worker fell silent. The FSM does not care. <code>(claimed, reclaim)</code> and <code>(running, reclaim)</code> are both legal; everything else is not. The supervisor&#39;s job is purely to detect staleness and emit the event.</p>
+<p>Second, the event lands in <code>job_events</code> alongside every other transition. A query like &quot;show me every reclaim in the last hour, grouped by from-state&quot; is one SQL statement. You did not write any reclaim-specific logging because there was nothing reclaim-specific to log.</p>
+<p>Third, the optimistic lock cleanly handles the awkward case where the original worker is somehow still alive and tries to report back. Its <code>state_version</code> is stale, the <code>UPDATE</code> returns zero rows, it logs the conflict, drops the job, and goes idle. No zombie. No double-execution.</p>
+<p>This works because of one rule that the state machine makes easy to enforce: nothing writes directly to the <code>state</code> column. Everything emits events, which go through <code>apply</code>, which checks the transition table, which writes through the optimistic lock. The whole system has exactly one path that can change a job&#39;s state. That is the property you want.</p>
+<h2>Illegal transitions are how you find bugs</h2>
+<p>When you ship this, expect your <code>IllegalTransition</code> rate to be non-zero for the first month. That is good. Every one of them is a real bug that the old boolean-soup version was silently swallowing.</p>
+<p>The kinds of bugs you will catch are not exotic. They are the bugs every job runner has. A few representative shapes:</p>
+<ul>
+<li><p>A worker retries its <code>start</code> event when its first attempt times out, after the orchestrator has already moved on. Result: a <code>start</code> event arriving on a <code>running</code> job. With booleans, this would just bump a timestamp and carry on. With a state machine, in a system like this it would page you at 4am, and the retry logic is usually a one-line fix once you can see what is happening.</p>
+</li>
+<li><p>A pause endpoint that does not check whether the job is actually running. Operators &quot;pause&quot; completed jobs and get confused about why the UI shows <code>paused, last result: passed</code>. The state machine refuses the transition, the UI shows an error, the operators stop doing it.</p>
+</li>
+<li><p>During a rolling deploy, supervisor-A (version 5) reads a stale <code>running</code> job at <code>state_version = 7</code> and fires <code>RECLAIM</code>. Fifty milliseconds later, supervisor-B (also version 5, the new pod that just came up) reads the same row, also sees <code>state_version = 7</code>, and fires its own <code>RECLAIM</code>. Supervisor-A&#39;s <code>UPDATE</code> lands first, bumps the version to 8, returns one row. Supervisor-B&#39;s <code>UPDATE</code> returns zero rows, B logs the conflict and drops the event. The job is reclaimed exactly once. The event log shows two <code>RECLAIM</code> attempts from two actors, which is usually the first time anyone notices that two supervisors have been running side by side because nobody updated the systemd unit when the deploy script changed.</p>
+</li>
+</ul>
+<p>The state machine does not prevent any of this. It makes the bugs loud, so you fix them instead of building scar tissue around them.</p>
+<h2>What this does not solve</h2>
+<p>I want to be clear about scope. A finite state machine for job lifecycle does not give you scheduling fairness, priority, resource awareness, or dependency graphs between jobs. Those are real problems and they deserve their own designs. What the FSM gives you is a foundation that those higher-level systems can trust: when they ask &quot;what state is job X in?&quot;, they get a single, unambiguous answer, and they can reason about what is and is not possible from there.</p>
+<p>Seven states, eleven transitions, an optimistic lock on the version column, and reclaim through the same machinery as everything else. The bugs you have been chasing largely stop existing, and the ones that remain will tell you exactly where they are.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

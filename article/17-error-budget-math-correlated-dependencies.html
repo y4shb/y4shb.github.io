@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Error budget math when your SLO has correlated dependencies - Yash Bhardwaj</title>
+<meta name="description" content="Multiplying availability numbers across services assumes failures are independent. They are not, and the gap is where your pager lives">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/17-error-budget-math-correlated-dependencies.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Error budget math when your SLO has correlated dependencies - Yash Bhardwaj">
+<meta property="og:description" content="Multiplying availability numbers across services assumes failures are independent. They are not, and the gap is where your pager lives">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/17-error-budget-math-correlated-dependencies.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Error budget math when your SLO has correlated dependencies - Yash Bhardwaj">
+<meta name="twitter:description" content="Multiplying availability numbers across services assumes failures are independent. They are not, and the gap is where your pager lives">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Error budget math when your SLO has correlated dependencies","datePublished":"2026-04-24","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/17-error-budget-math-correlated-dependencies.html"},"url":"https://y4shbhardwaj.com/article/17-error-budget-math-correlated-dependencies.html","description":"Multiplying availability numbers across services assumes failures are independent. They are not, and the gap is where your pager lives","keywords":"slo, reliability, math"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">slo</span><span class="chip">reliability</span><span class="chip">math</span></div></div><div class="meta-bottom"><span class="meta-read">11 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Apr 24, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Error budget math when your SLO has correlated dependencies</h1>
+<p><em>multiplying availability numbers across services assumes failures are independent. They are not, and the gap is where your pager lives</em></p>
+<p>The first time someone showed me the math for composing service availability, I nodded along because it looked like statistics I half-remembered from school. Service A is 99.9, service B is 99.9, your endpoint calls both, so your endpoint is 0.999 times 0.999 which rounds to 99.8. Cute. Everyone writes it on a whiteboard, books a quarterly review, and goes back to fighting fires.</p>
+<p>The problem is that this formula is true only when the failure events are independent, and almost nothing in a real system is independent. The moment two services share a database, an auth provider, a control plane, a region, a deployment pipeline, or a single overworked SRE, their failure probabilities couple. The naive product can lie in either direction depending on how the per-service SLIs were measured: if each sibling&#39;s published availability already includes shared-ancestor downtime, the product double- and triple-counts that downtime and understates the real availability; if each sibling&#39;s SLI silently excludes ancestor-caused failures, the product flatters reality and overstates availability. Either way the arithmetic is fiction; the only question is which sign of fiction you are buying.</p>
+<p>This post works through that gap with a running example: a search endpoint called <code>/v1/search/items</code> that depends on three services, all of which lean on the same identity service for token validation. I will show why the textbook calculation says 99.9 and why the honest ceiling is closer to 99.5, and what to do about it before someone hands you a postmortem.</p>
+<h2>The textbook formula and where it lies</h2>
+<p>For an endpoint that requires <code>n</code> independent dependencies to succeed, the combined availability is the product of the individual availabilities. If each dependency is <code>A_i</code>, the endpoint sees:</p>
+<pre><code>A_endpoint = A_1 * A_2 * A_3 * ... * A_n</code></pre>
+<p>Three dependencies at 99.95 each gives <code>0.9995^3</code> which is roughly 99.85. Comfortable enough to commit to a 99.9 user-facing SLO if you have a little client-side retry headroom.</p>
+<p>The hidden assumption is that the events &quot;service 1 is down&quot; and &quot;service 2 is down&quot; are statistically independent. The joint probability of both being down is the product of the individual probabilities only when knowing one tells you nothing about the other. In practice, knowing that service 1 is down often tells you a great deal about service 2, because they share fate.</p>
+<p>A more honest formula for two services with a shared failure mode is:</p>
+<pre><code>P(both up) = P(both up | shared healthy) * P(shared healthy)
+           + P(both up | shared down)    * P(shared down)</code></pre>
+<p>If a shared dependency being down forces both downstreams to fail, the second term collapses to zero and the joint availability is bounded above by the shared dependency&#39;s availability. Without a fallback path, you cannot be more available than your weakest common ancestor. (Fallbacks exist; caching positive token validations is the canonical one, and we will get to it. But absent a fallback, the ceiling is hard.)</p>
+<h2>The running example</h2>
+<p>Endpoint: <code>/v1/search/items</code>. Hits three services in sequence:</p>
+<ul>
+<li><code>query-planner</code>: parses the query, decides which indices to hit. Calls <code>identity</code> on every request to validate the caller&#39;s token.</li>
+<li><code>index-shard-router</code>: fans out to the right shards. Calls <code>identity</code> to authorize cross-tenant lookups.</li>
+<li><code>result-ranker</code>: scores and orders the candidate set. Calls <code>identity</code> to pull the caller&#39;s preference vector.</li>
+</ul>
+<p>Each of the three sibling services has a published 99.95 availability over the trailing 28 days. The identity service has a published 99.9. The naive multiplication says:</p>
+<pre><code>0.9995 * 0.9995 * 0.9995 = 0.9985  -&gt; 99.85% endpoint availability</code></pre>
+<p>This is the number someone put in the SLO doc. It is wrong, and the way it is wrong is that none of those three 99.95 numbers are actually independent of the 99.9 identity number.</p>
+<pre><code>                    +-----------------+
+                    |    identity     |  99.90
+                    +--------+--------+
+                             |
+        +--------------------+--------------------+
+        |                    |                    |
+        v                    v                    v
++---------------+   +-----------------+   +-----------------+
+| query-planner |   | index-shard-rtr |   |  result-ranker  |
+|     99.95     |   |      99.95      |   |      99.95      |
++-------+-------+   +--------+--------+   +--------+--------+
+        |                    |                     |
+        +--------------------+---------------------+
+                             |
+                             v
+                  /v1/search/items endpoint</code></pre>
+<p>The 99.95 numbers for the three siblings already include the downtime caused by identity outages, because their availability is measured at their own edge. When identity goes down, all three siblings go down with it, and that joint downtime is being counted three separate times in the multiplication.</p>
+<h2>Decomposing the failure modes</h2>
+<p>The clean way to think about this is to separate each sibling&#39;s downtime into two buckets:</p>
+<ol>
+<li>Downtime caused by the shared dependency (identity).</li>
+<li>Downtime caused by anything else (its own bugs, its own host failures, its own deploys).</li>
+</ol>
+<p>Let <code>D_shared</code> be the fraction of time identity is down, and let <code>D_i_own</code> be the fraction of time sibling <code>i</code> is down for its own reasons. Assume the &quot;own&quot; failures are roughly independent across siblings, which is a much weaker assumption than full independence.</p>
+<p>Each sibling&#39;s measured availability is roughly:</p>
+<pre><code>A_i = 1 - (D_shared + D_i_own)</code></pre>
+<p>If identity is 99.9, then <code>D_shared</code> is 0.001. If the sibling reports 99.95, then <code>D_shared + D_i_own = 0.0005</code>. This is already impossible. The sibling cannot be down for 0.0005 of the time if the dependency it requires is down for 0.001 of the time. Either the sibling has some fallback path that lets it survive identity outages, or the measurement excludes them, or one of the numbers is wrong.</p>
+<p>In practice the answer is usually &quot;the measurement excludes them.&quot; The sibling&#39;s SLI is computed against requests that the sibling itself processed, and during an identity outage the sibling returns fast 401s that look like clean responses to the sibling&#39;s own metrics. The customer sees them as failures; the sibling&#39;s dashboard sees them as success. This is a different blog post, but it is worth flagging because it means your published SLOs are often more flattering than reality.</p>
+<p>Assume for the example that the siblings are honest and report end-to-end availability including identity-caused failures. Then to get the joint endpoint availability we want:</p>
+<pre><code>A_endpoint = P(all three siblings up at the same time)
+           = P(identity up) * P(all three &quot;own&quot; components up | identity up)
+           = (1 - D_shared) * (1 - D_1_own) * (1 - D_2_own) * (1 - D_3_own)</code></pre>
+<p>With <code>D_shared = 0.001</code> and each <code>D_i_own = 0.0005 - 0.001 = -0.0005</code>, the math breaks. The published 99.95 was either wrong, over-counted, or measured in a way that hides identity-caused failures. To get a coherent example, assume identity is genuinely 99.9 and each sibling has 99.99 &quot;own&quot; availability. Then each sibling&#39;s realistic end-to-end measured availability is:</p>
+<pre><code>A_i = (1 - 0.001) * (1 - 0.0001) = 0.999 * 0.9999 = 0.9989</code></pre>
+<p>So a sibling claiming 99.95 with a 99.9 dependency is either lying, fault-tolerant against identity outages, or counting differently than you think. From here on we use the realistic 99.89% sibling number rather than the published 99.95%.</p>
+<h2>The actual joint availability</h2>
+<p>With the corrected sibling availability of 99.89, the naive product is:</p>
+<pre><code>0.9989^3 = 0.9967  -&gt;  99.67%</code></pre>
+<p>Already lower than the 99.85 we started with. But the joint availability with shared failure mode is not the product. It is:</p>
+<pre><code>P(all three up) = P(identity up) * P(all three own components up)
+                = 0.999 * (0.9999)^3
+                = 0.999 * 0.99970003
+                = 0.99870</code></pre>
+<p>So the honest endpoint availability is 99.87, not 99.85 and definitely not 99.9. Notice that this is actually slightly higher than the naive product of the realistic sibling numbers, because that product was triple-counting identity downtime. The shared-dependency math gives a higher availability number than naive multiplication of end-to-end SLIs, because the identity outage is now counted once instead of three times.</p>
+<p>Now flip one variable. Say identity is closer to 99.5 because it has a noisy quarter and a regional event ate two hours of budget. Recompute:</p>
+<pre><code>P(all three up) = 0.995 * (0.9999)^3
+                = 0.995 * 0.99970003
+                = 0.99471</code></pre>
+<p>You are at 99.47. Your SLO says 99.9. You are burning more than five times your monthly budget every month for as long as identity stays at 99.5. The naive product would have said:</p>
+<pre><code>A_i = 0.995 * 0.9999 = 0.99490
+0.99490^3 = 0.9848  -&gt;  98.48%</code></pre>
+<p>The naive number screams &quot;you are toast.&quot; The shared-dependency number says &quot;you are bad but not that bad.&quot; In both cases the team&#39;s published 99.9 SLO is fiction; the gap between them is whether the budget hole is roughly 5x or 15x.</p>
+<h2>A working calculator</h2>
+<p>Here is the kind of script I keep in a <code>tools/</code> directory and run before every quarterly SLO review. It takes a tree of dependencies with shared ancestors and prints the realistic ceiling.</p>
+<pre><code class="hljs language-python">from dataclasses import dataclass, field
+
+@dataclass
+class Dep:
+    name: str
+    own_availability: float          # availability ignoring shared deps
+    shared: list = field(default_factory=list)  # list[Dep]
+
+def joint_availability(siblings):
+    &quot;&quot;&quot;
+    Compute P(all siblings up) accounting for shared ancestors.
+    Assumes &#39;own&#39; failures are independent across siblings.
+    &quot;&quot;&quot;
+    # Collect all unique shared ancestors.
+    # Assumes all references to a given shared dep use the same object;
+    # if two siblings declare the same name with different own_availability,
+    # the last write wins. Add an assertion in production.
+    shared_set = {}
+    for s in siblings:
+        for dep in s.shared:
+            if dep.name in shared_set:
+                assert shared_set[dep.name] is dep, (
+                    f&quot;conflicting definitions for shared dep {dep.name!r}&quot;
+                )
+            shared_set[dep.name] = dep
+    shared = list(shared_set.values())
+
+    # P(all shared up) = product of shared availabilities
+    p_shared_all_up = 1.0
+    for d in shared:
+        p_shared_all_up *= d.own_availability
+
+    # P(all siblings&#39; own components up)
+    p_own = 1.0
+    for s in siblings:
+        p_own *= s.own_availability
+
+    return p_shared_all_up * p_own
+
+identity = Dep(&quot;identity&quot;, own_availability=0.999)
+planner = Dep(&quot;query-planner&quot;,     own_availability=0.9999, shared=[identity])
+router  = Dep(&quot;index-shard-router&quot;, own_availability=0.9999, shared=[identity])
+ranker  = Dep(&quot;result-ranker&quot;,     own_availability=0.9999, shared=[identity])
+
+a = joint_availability([planner, router, ranker])
+# Using a 30-day month; align with your SLO window
+# (28-day rolling is also common).
+budget_minutes_per_month = (1 - a) * 30 * 24 * 60
+print(f&quot;endpoint availability: {a:.5f}&quot;)
+print(f&quot;monthly downtime: {budget_minutes_per_month:.1f} min&quot;)</code></pre>
+<p>For the 99.9 identity case this prints 99.87 and about 56 minutes a month. For the 99.5 identity case it prints 99.47 and about 230 minutes a month. Run this against your real numbers before you commit to the SLO, not after the first month of burn.</p>
+<h2>What to do about it</h2>
+<p>A few things, in rough order of effort.</p>
+<p><strong>Set the SLO at the honest ceiling, not the aspirational one.</strong> If your shared ancestor is 99.9, you cannot promise 99.95 to your callers without a fallback that survives the ancestor being down. Promising it anyway just means you spend every all-hands explaining a hole that is structurally impossible to close.</p>
+<p><strong>Track the ancestor&#39;s availability as a leading indicator.</strong> When identity&#39;s trailing-7 starts to slip, your endpoint&#39;s trailing-28 is going to slip a few weeks later. Put the ancestor on the same dashboard as your endpoint, with the same color coding. Engineers should not have to click through three tiers to figure out why their budget is bleeding. The routing problem this creates (a single ancestor outage firing every downstream SLO alert at once) is a separate concern; this post focuses on the math, and routing is covered elsewhere.</p>
+<p><strong>Build a fallback path for the ancestor where possible.</strong> For identity specifically, this often means caching positive token validations for some short window so a 30-second identity blip does not turn into 30 seconds of universal 401s. The cache has its own risks (revoked tokens stay valid for the cache lifetime) but the tradeoff is usually worth it for read paths. Do not cache for write paths or anything that grants new access.</p>
+<p><strong>Compute and publish a &quot;minus shared&quot; availability number.</strong> Alongside your headline SLO, publish the availability of your endpoint excluding shared-ancestor downtime. This lets you separate &quot;we are slow because identity is having a quarter&quot; from &quot;we are slow because we shipped a bad deploy.&quot; Without this split, every postmortem turns into a fight about whose fault it was.</p>
+<p><strong>Stop letting downstream SLIs hide upstream failures.</strong> If your sibling service measures availability against requests it actually saw, identity outages disappear from its dashboard. Add a synthetic that hits the sibling through the full request path including auth, and use that for the SLI. The numbers will be uglier, but they will be true.</p>
+<h2>The thing nobody puts in the doc</h2>
+<p>The arithmetic above is not hard. A junior engineer can derive it in twenty minutes. The reason every team&#39;s published SLO is too optimistic is not that the math is too advanced; it is that nobody wants to be the person who writes &quot;99.5&quot; in the cell where leadership expected &quot;99.9.&quot; The naive multiplication is a polite fiction that lets everyone go back to their roadmap.</p>
+<p>The cost of the polite fiction is paid in 3 AM pages and quarterly explanations of why the burn rate alert went off. If you do the honest math up front, you get to choose between investing in fault tolerance, lowering the published number, or eating the burn. You get to make that choice on a sunny Wednesday instead of in a postmortem with three vice presidents on the call. It is not glamorous work, but neither is explaining for the fourth time why your endpoint cannot be more available than the auth service it depends on.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

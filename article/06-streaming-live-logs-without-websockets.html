@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Streaming live logs to the browser without WebSockets - Yash Bhardwaj</title>
+<meta name="description" content="Four boring transports, one annoying corporate proxy, and the connection budget nobody warns you about">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/06-streaming-live-logs-without-websockets.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Streaming live logs to the browser without WebSockets - Yash Bhardwaj">
+<meta property="og:description" content="Four boring transports, one annoying corporate proxy, and the connection budget nobody warns you about">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/06-streaming-live-logs-without-websockets.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Streaming live logs to the browser without WebSockets - Yash Bhardwaj">
+<meta name="twitter:description" content="Four boring transports, one annoying corporate proxy, and the connection budget nobody warns you about">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Streaming live logs to the browser without WebSockets","datePublished":"2025-12-21","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/06-streaming-live-logs-without-websockets.html"},"url":"https://y4shbhardwaj.com/article/06-streaming-live-logs-without-websockets.html","description":"Four boring transports, one annoying corporate proxy, and the connection budget nobody warns you about","keywords":"streaming, logs, http"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">streaming</span><span class="chip">logs</span><span class="chip">http</span></div></div><div class="meta-bottom"><span class="meta-read">11 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Dec 21, 2025</span></div></div><div id="content" data-prebaked="1"><h1>Streaming live logs to the browser without WebSockets</h1>
+<p><em>four boring transports, one annoying corporate proxy, and the connection budget nobody warns you about</em></p>
+<p>Every internal tool grows a live-logs tab. Someone opens the page and expects lines to scroll in real time. The first instinct is always the same: WebSockets. It works until traffic crosses a proxy that strips the Upgrade header and the connection degrades to a 504 every 30 seconds.</p>
+<p>This post is about what to do when WebSockets aren&#39;t on the table. I&#39;ll walk through the four transports that actually survive in hostile network environments, what each one costs, and the per-tab connection budget that will eventually bite you no matter which one you pick.</p>
+<p>The example throughout: a log-tailing service I&#39;ll call <code>tailroom</code>. Its input is bursty by nature, a quiet baseline punctuated by spikes when a build hits its link stage and a single process dumps a few thousand lines in a couple of seconds. A user opens a job page in their browser and wants to see lines as they&#39;re emitted, ideally with under a second of latency, and they expect the page to keep up when the burst hits.</p>
+<h2>Why WebSockets fail in the wild</h2>
+<p>Before picking an alternative, it helps to know what&#39;s killing the WebSocket. In one paragraph: some intermediary on the path either doesn&#39;t speak the protocol (HTTP/1.1-only proxies strip the <code>Upgrade: websocket</code> header), kills idle flows (many HTTP load balancers default to around 60s idle timeout, with AWS ALB at 60s for example), or recognizes the frames and rate-limits them. None of these look like &quot;WebSockets are blocked&quot; from the browser&#39;s side; they look like flaky reconnects and an on-call ticket the next morning.</p>
+<pre><code>   browser              corporate proxy             origin
+  ┌───────┐            ┌────────────────┐         ┌────────┐
+  │  tab  │── GET ────▶│ HTTP/1.1 only  │── ?? ──▶│  app   │
+  │       │  Upgrade:  │                │         │        │
+  │       │  websocket │ [1] strips     │         │        │
+  │       │            │     Upgrade    │         │        │
+  │       │◀── 200 ────│ [2] 60s idle   │◀────────│        │
+  │       │   (no ws)  │     timeout    │         │        │
+  │       │            │ [3] inspects   │         │        │
+  └───────┘            │     frames     │         └────────┘
+                       └────────────────┘</code></pre>
+<p>[1] is why your connection becomes a regular HTTP/1.1 GET. [2] is why &quot;it works for 30 seconds then dies&quot; gets reported. [3] is why some frames make it and others don&#39;t. The deep-dive on LB idle timeouts and replay-on-reconnect is in blog 01. Once you&#39;ve debugged it twice, you stop fighting the proxy and pick a transport it understands natively.</p>
+<h2>Transport 1: Server-Sent Events</h2>
+<p>SSE is the obvious first choice and usually the right one. It&#39;s just an HTTP/1.1 GET that never closes, with a <code>text/event-stream</code> content type and a specific line format the browser parses for you.</p>
+<pre><code>GET /jobs/42/stream HTTP/1.1
+Accept: text/event-stream
+
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+X-Accel-Buffering: no
+
+data: worker-3 | 14:02:11 | linking stage 2
+id: 81923
+
+data: worker-1 | 14:02:11 | test suite passed (244/244)
+id: 81924
+
+: keepalive</code></pre>
+<p>That last line, the one starting with a colon, is an SSE comment. Browsers ignore it but proxies count it as traffic, which is exactly what you want to keep the connection from being killed for idleness. Send one every 15 seconds and 95% of corporate proxies stay happy.</p>
+<p>One spec detail that trips beginners: SSE events are terminated by a blank line, and multi-line payloads use repeated <code>data:</code> prefixes which the browser joins with newlines into a single <code>event.data</code> string. So a 3-line log entry is three <code>data:</code> lines followed by one blank line, not three separate events.</p>
+<p>The browser side is built in:</p>
+<pre><code class="hljs language-js">const es = new EventSource(`/jobs/${jobId}/stream?since=${lastId}`);
+es.onmessage = (e) =&gt; appendLine(e.data);
+es.onerror = () =&gt; {
+  // Browser auto-reconnects with Last-Event-ID header
+  // (only once it has actually received an event with id:).
+  // You don&#39;t need to write reconnect logic. Really.
+};</code></pre>
+<p>The thing nobody tells you on day one is that <code>EventSource</code> does exponential reconnect for free, and it automatically sends back the last <code>id:</code> it saw as a <code>Last-Event-ID</code> request header on reconnect. You don&#39;t have to write the cursor-tracking loop yourself, the browser does it. The browser only sends Last-Event-ID once it has actually received an event with <code>id:</code>; if your stream never emits ids, you get reconnect but no replay cursor. This Last-Event-ID round trip is genuinely unique to SSE; with chunked HTTP or WebSockets you build the equivalent by hand. It is the reason I reach for SSE first.</p>
+<p>The catches:</p>
+<ul>
+<li><strong>One direction only.</strong> Server to client. If the user clicks a &quot;pause tailing&quot; button and you want the server to know, that&#39;s a separate POST.</li>
+<li><strong>No binary.</strong> It&#39;s UTF-8 text framed by newlines. Encode binary as base64 or, better, don&#39;t put binary in your log stream.</li>
+<li><strong>Per-host connection budget.</strong> This is the big one. More on it in a minute.</li>
+</ul>
+<h2>Transport 2: chunked HTTP with a long-lived response</h2>
+<p>Before SSE existed, people did this manually. The server holds the response open and writes chunks as data arrives. The client uses <code>fetch</code> with a <code>ReadableStream</code> and parses chunks itself.</p>
+<pre><code class="hljs language-js">const res = await fetch(`/jobs/${jobId}/stream-raw`);
+const reader = res.body.getReader();
+const decoder = new TextDecoder();
+let buf = &#39;&#39;;
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buf += decoder.decode(value, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(&#39;\n&#39;)) !== -1) {
+    appendLine(buf.slice(0, nl));
+    buf = buf.slice(nl + 1);
+  }
+}
+// Flush any trailing partial UTF-8 sequence held by the decoder.
+buf += decoder.decode();
+if (buf) appendLine(buf);</code></pre>
+<p><code>TextDecoder</code> with <code>{ stream: true }</code> is the important bit. It holds onto partial UTF-8 sequences across reads, so an emoji whose bytes get split across two <code>read()</code> calls comes out intact. The final <code>decoder.decode()</code> with no argument flushes anything still buffered when the server closes the stream.</p>
+<p>Why would you do this instead of SSE? Three reasons hold up: you want to stream binary (protobuf, msgpack) and don&#39;t want to base64 it; you need custom framing with sequence numbers or batch markers that SSE&#39;s flat event model can&#39;t express; or some intermediary doesn&#39;t like the <code>text/event-stream</code> content type. I&#39;ve seen one ancient WAF that buffered SSE responses entirely but happily streamed <code>application/octet-stream</code>.</p>
+<p>The cost: you write your own reconnect, resume, and keepalive. There&#39;s no <code>Last-Event-ID</code> magic. You also lose dev tools&#39; SSE-aware view, which I miss every time.</p>
+<p>One important detail: if there&#39;s an Nginx or similar reverse proxy in front of your app, set <code>X-Accel-Buffering: no</code> on the response (or the equivalent for your proxy). Otherwise the proxy buffers the entire response and your &quot;live&quot; stream arrives all at once when the request finally times out. This is the single most common reason a chunked-HTTP log stream &quot;doesn&#39;t work in production but works on my laptop.&quot;</p>
+<h2>Transport 3: long-polling</h2>
+<p>Long-polling is the fallback when nothing streaming works. The client makes a normal HTTP request. The server holds it open until either (a) there are new log lines to return, or (b) some timeout (typically 25-30 seconds) elapses. The server returns, the client reads the data, and immediately fires another request with a cursor.</p>
+<pre><code>GET /jobs/42/poll?cursor=81924&amp;max_wait=25s
+=&gt; [{ id: 81925, line: &quot;...&quot; }, { id: 81926, line: &quot;...&quot; }]
+
+GET /jobs/42/poll?cursor=81926&amp;max_wait=25s
+=&gt; []   // 25s elapsed with no new data
+
+GET /jobs/42/poll?cursor=81926&amp;max_wait=25s
+=&gt; [{ id: 81927, ... }]</code></pre>
+<p>This works literally everywhere. I&#39;ve shipped long-polling to environments so locked down that even SSE was buffered. It&#39;s also miserable: there&#39;s a latency floor between &quot;server returns&quot; and &quot;client fires next request&quot; where lines pile up (5-50ms), request amplification is brutal (a 1-hour job with 10 viewers, assuming a poll cadence of 8s in busy mode, works out to 3600 / 8 * 10 = 4,500 requests for the hour), and without atomic &quot;fetch since X&quot; cursor semantics you&#39;ll drop or duplicate lines on every mid-flight failure.</p>
+<p>When does long-polling win? When you have few viewers, low update frequency, and a network so hostile that nothing else works. Also when every request must go through a strict auth layer with short-lived tokens, because each poll re-authenticates naturally.</p>
+<h2>Transport 4: message-bus fan-out</h2>
+<p>The first three transports are about how bytes get from your HTTP server to the browser. This fourth one is about a different problem: how do the log lines from N workers get to the HTTP server in the first place?</p>
+<p>In the naive design, each worker writes its log lines somewhere (a database, a file, a tailing socket) and the HTTP server polls or tails that thing for every connected browser. This falls over the moment you have a few workers and a few viewers. Now you have N times M open file handles or N times M database queries per second.</p>
+<p>The fix is a fan-out bus. Workers publish lines to a single topic, keyed by job ID. The HTTP server subscribes once per connected browser and forwards what it receives. The bus handles the multiplexing.</p>
+<pre><code>worker-1 ──┐
+worker-2 ──┼──► [bus topic: job.42] ──┬──► browser A (via SSE)
+worker-3 ──┘                          ├──► browser B (via SSE)
+                                      └──► browser C (via chunked HTTP)</code></pre>
+<p>A minimal Redis pub/sub bridge into SSE is about ten lines of Node:</p>
+<pre><code class="hljs language-js">import { createClient } from &#39;redis&#39;;
+import express from &#39;express&#39;;
+
+const app = express();
+app.get(&#39;/jobs/:id/stream&#39;, async (req, res) =&gt; {
+  res.set({
+    &#39;Content-Type&#39;: &#39;text/event-stream&#39;,
+    &#39;Cache-Control&#39;: &#39;no-cache&#39;,
+    &#39;X-Accel-Buffering&#39;: &#39;no&#39;,
+  });
+  const sub = createClient();
+  await sub.connect();
+  await sub.subscribe(`job.${req.params.id}`, (line, channel) =&gt; {
+    res.write(`data: ${line}\n\n`);
+  });
+  req.on(&#39;close&#39;, () =&gt; sub.quit());
+});</code></pre>
+<p>Workers <code>PUBLISH job.42 &quot;&lt;line&gt;&quot;</code> and every subscribed HTTP handler forwards it. No per-viewer worker coupling; the bus does the multiplexing.</p>
+<p>What&#39;s &quot;the bus&quot;? Whatever you already have. Redis pub/sub works fine at low to moderate scale and is dead simple. NATS is nicer if you want subject hierarchies (<code>job.42.worker.3</code>) and reliable delivery. Kafka is overkill for live tailing but if you&#39;re already using it for log archival, you can subscribe to the same topic from your tailing API and get fan-out for free.</p>
+<p>The one thing to avoid: don&#39;t try to be clever and have each worker push directly to a per-browser endpoint. That couples your worker code to your UI&#39;s connection state, which is a category error. Workers should not know or care who&#39;s watching.</p>
+<h2>The per-tab connection budget</h2>
+<p>Now the thing that catches everyone out. Browsers cap concurrent HTTP/1.1 connections per origin at <strong>6</strong>. Chrome and Edge use 6 in the Chromium source (<code>net/socket/client_socket_pool_manager.cc</code>); Firefox&#39;s <code>network.http.max-persistent-connections-per-server</code> pref defaults to 6 as well. Treat 6 as the portable ceiling.</p>
+<p>For a single log-tailing page, that&#39;s fine: one SSE connection, five spare. But the limit is per-origin total, so the page load itself competes with SSE for slots (JS chunks, images, XHRs all draw from the same six). If your user opens five job tabs at once, each holding an SSE connection, they&#39;re at five out of six before the sixth tab even starts fetching its assets, and that next page load blocks waiting for a slot. The page sits there spinning until one of the SSE connections closes.</p>
+<p>This is the bug that gets filed as &quot;the dashboard randomly freezes when I have a lot of tabs open&quot; and it is genuinely hard to debug because nothing is broken. The browser is doing exactly what the spec says.</p>
+<p>Three ways to deal with it:</p>
+<ol>
+<li><p><strong>Use HTTP/2.</strong> HTTP/2 multiplexes many streams over one TCP connection, so the 6-connection limit becomes effectively meaningless. SSE over HTTP/2 is the cleanest fix. HTTP/2 raises the limit but doesn&#39;t eliminate it; <code>SETTINGS_MAX_CONCURRENT_STREAMS</code> still applies per connection, typically 100 or more. The other catch: some old proxies don&#39;t speak HTTP/2 either, and you might be back where you started.</p>
+</li>
+<li><p><strong>Share one connection across tabs with a SharedWorker.</strong> A <code>SharedWorker</code> is a worker that&#39;s shared by all tabs of the same origin. One SharedWorker holds one SSE connection to the server, subscribes to all the job IDs the user is watching, and uses <code>postMessage</code> to deliver lines to each tab. This works and I&#39;ve seen it in production, but the developer ergonomics are not great. Debugging a SharedWorker is its own little adventure.</p>
+</li>
+<li><p><strong>Domain sharding.</strong> Serve your streaming endpoint from <code>stream.example.com</code> instead of <code>app.example.com</code>. The 6-connection limit is per origin, so the streaming traffic doesn&#39;t compete with regular page loads. This is the pragmatic fix for HTTP/1.1 environments and costs you one cert and one DNS record.</p>
+</li>
+</ol>
+<h2>Backpressure, or what happens when the user opens a 4-hour job</h2>
+<p>Here&#39;s a scenario that will eventually happen: a user opens a job that&#39;s been running for four hours and has produced 600,000 log lines. They want to scroll back to line 30,000 to find that one warning. What does your system do?</p>
+<p>The wrong answer is to ship all 600,000 lines down the wire on connect. Even at 1KB per line that&#39;s 600MB held in a browser tab. The DOM cost alone (one node per line, plus whatever scrollback your virtualizer keeps live) will OOM the tab on a 4GB laptop long before you finish receiving. The browser-tab memory ceiling is the part that&#39;s actually specific to log streaming, separate from any server-side queue policy (which is blog 01&#39;s territory).</p>
+<p>The right answer has two parts:</p>
+<ol>
+<li><p><strong>Tail vs. browse are different modes.</strong> The live stream gives you the most recent N lines and then live tails. Scrolling backwards is a separate paginated request against a backing store (database, object store, whatever). Don&#39;t try to make one endpoint do both.</p>
+</li>
+<li><p><strong>Cap what the tab holds.</strong> Pick a ceiling, say 20,000 lines, and once you cross it, evict from the top with a &quot;older lines available via search&quot; affordance. At ~200 bytes per line that&#39;s roughly 4MB of raw text resident; pair it with a virtualized scroll list (react-window, TanStack Virtual, your framework&#39;s equivalent) so the DOM only renders the visible window and total tab footprint stays in the tens of MB rather than hundreds. This is what keeps a long-running job tab from becoming a slow memory leak that finally falls over at 3am.</p>
+</li>
+</ol>
+<h2>Reconnect semantics, because everything disconnects</h2>
+<p>Three things will disconnect your stream: the network blipping, the user&#39;s laptop going to sleep, and the proxy&#39;s idle timeout. All three will happen. The general &quot;stamp every event with a sequence number and replay on reconnect&quot; pattern is covered in blog 01; what&#39;s worth saying here is the SSE-specific shortcut.</p>
+<p>With <code>EventSource</code>, the browser remembers the last <code>id:</code> it received and, on reconnect, automatically sends it as the <code>Last-Event-ID</code> request header. The client code is literally nothing extra. Your server just has to:</p>
+<ul>
+<li>Read <code>Last-Event-ID</code> from the reconnect request (if present).</li>
+<li>Replay buffered events from that ID, then continue live.</li>
+<li>Keep a small in-memory window per job, indexed by ID, so replay is O(1) lookup followed by a range scan.</li>
+</ul>
+<p>In pseudocode, the handler looks like this:</p>
+<pre><code class="hljs language-js">app.get(&#39;/jobs/:id/stream&#39;, (req, res) =&gt; {
+  const buf = ringBufferFor(req.params.id);   // [{id, line}, ...]
+  const since = parseInt(req.header(&#39;Last-Event-ID&#39;) || &#39;0&#39;, 10);
+
+  // 1. Replay everything in the ring buffer after `since`.
+  for (const ev of buf.sliceAfter(since)) {
+    res.write(`id: ${ev.id}\ndata: ${ev.line}\n\n`);
+  }
+
+  // 2. Subscribe live and forward new events as they arrive.
+  const unsub = buf.onAppend((ev) =&gt; {
+    res.write(`id: ${ev.id}\ndata: ${ev.line}\n\n`);
+  });
+  req.on(&#39;close&#39;, unsub);
+});</code></pre>
+<p>That window is the one parameter to tune. Too short and a 60-second laptop-lid-close causes lost lines; too long and a popular job eats your RAM. I usually start at 5 minutes and adjust based on actual reconnect-gap data.</p>
+<h2>Picking one</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Transport</th>
+<th>Direction</th>
+<th>Binary</th>
+<th>Built-in reconnect + cursor</th>
+<th>Proxy friendly</th>
+<th>Request amplification</th>
+<th>When to pick</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SSE</td>
+<td>S to C</td>
+<td>No (text)</td>
+<td>Yes (<code>Last-Event-ID</code> in browser)</td>
+<td>High</td>
+<td>1 long-lived GET</td>
+<td>Default; generic live tail</td>
+</tr>
+<tr>
+<td>Chunked HTTP</td>
+<td>S to C</td>
+<td>Yes</td>
+<td>No (DIY)</td>
+<td>High</td>
+<td>1 long-lived GET</td>
+<td>Binary framing or SSE specifically buffered</td>
+</tr>
+<tr>
+<td>Long-polling</td>
+<td>Bi (req)</td>
+<td>Yes (body)</td>
+<td>DIY cursor on every poll</td>
+<td>Highest</td>
+<td>High (one req per gap)</td>
+<td>Hostile networks where streaming is blocked</td>
+</tr>
+<tr>
+<td>Bus fan-out</td>
+<td>N/A</td>
+<td>Bus-dependent</td>
+<td>N/A (it&#39;s the backend, not wire)</td>
+<td>N/A</td>
+<td>1 sub per viewer</td>
+<td>Whenever N workers fan out to M viewers</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>If I&#39;m starting from zero on a generic &quot;tail logs from N workers to a browser tab&quot; problem, my default is SSE with a Redis (or similar) pub/sub backing the fan-out, served from a sharded subdomain. That covers maybe 85% of cases.</p>
+<p>I&#39;d switch to chunked HTTP if I needed binary framing or a hostile intermediary was buffering SSE specifically. I&#39;d switch to long-polling only if I&#39;d verified that nothing streamy worked at all, which happens less than you&#39;d think.</p>
+<p>Transport is the easy part. Connection budget, backpressure, and resume protocol decide whether the page works.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

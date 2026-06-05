@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why your load test lies: open versus closed workload models - Yash Bhardwaj</title>
+<meta name="description" content="A 12ms p99 that turns into 340ms the moment you stop politely waiting">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/19-load-test-open-versus-closed-workload.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Why your load test lies: open versus closed workload models - Yash Bhardwaj">
+<meta property="og:description" content="A 12ms p99 that turns into 340ms the moment you stop politely waiting">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/19-load-test-open-versus-closed-workload.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Why your load test lies: open versus closed workload models - Yash Bhardwaj">
+<meta name="twitter:description" content="A 12ms p99 that turns into 340ms the moment you stop politely waiting">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Why your load test lies: open versus closed workload models","datePublished":"2026-05-21","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/19-load-test-open-versus-closed-workload.html"},"url":"https://y4shbhardwaj.com/article/19-load-test-open-versus-closed-workload.html","description":"A 12ms p99 that turns into 340ms the moment you stop politely waiting","keywords":"load-testing, performance"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">load-testing</span><span class="chip">performance</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">May 21, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Why your load test lies: open versus closed workload models</h1>
+<p><em>a 12ms p99 that turns into 340ms the moment you stop politely waiting</em></p>
+<p>There is a particular flavor of performance regression that only shows up in production. The load test was green. The dashboards were green. The team shipped, and within twenty minutes of real traffic the latency graphs went vertical. Nobody had introduced a bug. The load test was just answering a different question than the one anyone thought it was answering.</p>
+<p>The question it was answering: &quot;how fast does this service respond when I send a request, wait politely for the response, and only then send the next one?&quot; The question everyone thought it was answering: &quot;how does this service behave when real users keep arriving regardless of how slow it is?&quot;</p>
+<p>These are not the same question. The first is a closed-loop model. The second is an open-loop model. The gap between them is where p99 numbers go to die.</p>
+<h2>The setup</h2>
+<p>Picture a recommendation service called <code>dovetail</code>. It serves personalized product cards. The team runs a nightly benchmark with a tool I will call <code>loadwhip</code> (any closed-loop tool with concurrency knobs works the same way). The script looks roughly like this:</p>
+<pre><code class="hljs language-python"># nightly_bench.py - the seductive lie
+import asyncio, httpx, time
+
+CONCURRENCY = 200
+DURATION_S = 60
+URL = &quot;http://dovetail.internal/cards?user=42&quot;
+
+async def worker(client, results):
+    end = time.monotonic() + DURATION_S
+    while time.monotonic() &lt; end:
+        t0 = time.monotonic()
+        r = await client.get(URL)
+        results.append((time.monotonic() - t0) * 1000)
+
+async def main():
+    results = []
+    async with httpx.AsyncClient(timeout=10) as client:
+        await asyncio.gather(*[worker(client, results) for _ in range(CONCURRENCY)])
+    results.sort()
+    p50 = results[len(results) // 2]
+    p99 = results[int(len(results) * 0.99)]
+    print(f&quot;requests={len(results)} p50={p50:.1f}ms p99={p99:.1f}ms&quot;)
+
+asyncio.run(main())</code></pre>
+<p>This reports something like:</p>
+<pre><code>requests=482103  p50=4.2ms  p99=12.1ms</code></pre>
+<p>A 12ms p99 at 200 concurrent workers. Ship it.</p>
+<p>The next morning real traffic arrives. Real traffic does not consist of 200 polite workers. It consists of an arrival process: a request shows up roughly every N microseconds, and it shows up whether or not the previous one has finished. The same service, under the same total request rate, suddenly reports a p99 of 340ms. Everyone is confused. The benchmark hasn&#39;t changed. The service hasn&#39;t changed. Only the model has.</p>
+<h2>Closed loop versus open loop</h2>
+<p>The terminology comes from queueing theory, where it has been understood for roughly sixty years and ignored for roughly fifty-nine. The two models look like this:</p>
+<pre><code>CLOSED LOOP (what most load testers do by default)
++---------+   request    +---------+
+| worker  | -----------&gt; | service |
+| (waits) | &lt;----------- |         |
++---------+   response   +---------+
+   |  ^
+   |  | &quot;I will not send the next one
+   v  |  until I see the response&quot;
+
+OPEN LOOP (what real users do)
++---------+   request    +---------+
+| arrival | -----------&gt; | service |
+| process |              |         |
++---------+              +---------+
+   |
+   | new request fires on a schedule,
+   v independent of any response</code></pre>
+<p>In the closed model, the load generator has a fixed number of &quot;virtual users&quot; and each one is a strict request/response loop. If the service slows down, the workers slow down with it, and the offered load drops automatically. The system can never overload itself because the test is implicitly back-pressured.</p>
+<p>In the open model, request arrivals are independent of service completions. If the service slows down, requests pile up. Queue depth grows. Latency for the request at the back of the queue includes the wait for everything in front of it. This is what real users do: when you load a product page, your browser fires the request whether or not the previous user&#39;s request has finished.</p>
+<p>The closed model measures service time. The open model measures response time (service time plus queue wait). For an unloaded system these are identical. For a loaded system they diverge by orders of magnitude.</p>
+<h2>Why p99 looks healthy in closed mode</h2>
+<p>Here is the mechanism in one sentence: closed-loop testers self-throttle on slow responses, so the slow responses never get to interact with each other.</p>
+<p>Imagine <code>dovetail</code> has a GC pause every few seconds that adds 200ms to about 0.5% of responses. In the closed test, when a worker hits a slow response it just... waits. For 200ms. During that time, that worker is not sending requests. The 199 other workers continue at normal speed. The slow response gets recorded as 200ms. It is one bad sample out of many. The 99th percentile barely moves.</p>
+<p>Now run the same workload in open mode at the same average rate. The GC pause hits. Arrivals keep arriving while the service is stalled, so one 200ms bad event becomes many bad responses, each carrying its own wait. The p99 craters. (The runtime mitigation, adaptive concurrency limits, is a separate story; see blog #14. Here the point is that the test never surfaced the problem in the first place.)</p>
+<p>This is what Gil Tene named &quot;coordinated omission&quot; in his 2013 talk: the load generator and the service have implicitly coordinated to omit the consequences of slow events. The bad samples that should exist were never generated, because the workers that would have generated them were busy waiting.</p>
+<h2>What the corrected number looks like</h2>
+<p>When we rerun the <code>dovetail</code> benchmark with a corrected, open-model generator firing at the same throughput, here is a representative example of what we see (the numbers below are illustrative for this fictional service, though the order-of-magnitude shape is consistent with published Coordinated Omission demonstrations by Gil Tene and ScyllaDB):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Closed loop (200 workers)</th>
+<th>Open loop (matching rate)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Throughput</td>
+<td>8,035 rps</td>
+<td>8,035 rps</td>
+</tr>
+<tr>
+<td>p50</td>
+<td>4.2 ms</td>
+<td>5.1 ms</td>
+</tr>
+<tr>
+<td>p90</td>
+<td>6.9 ms</td>
+<td>18 ms</td>
+</tr>
+<tr>
+<td>p99</td>
+<td>12.1 ms</td>
+<td>340 ms</td>
+</tr>
+<tr>
+<td>p99.9</td>
+<td>18.4 ms</td>
+<td>1,820 ms</td>
+</tr>
+<tr>
+<td>Max</td>
+<td>220 ms</td>
+<td>4,100 ms</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Throughput matched because <code>dovetail</code> had enough capacity at 8,035 rps; if the open-loop test had targeted higher than the service could sustain, achieved throughput would have fallen below target and the queue would have grown unbounded. p50 is barely different. p99 is 28x worse. p99.9 is roughly 100x worse. The service has not changed. The benchmark just stopped lying.</p>
+<p>The shape of the divergence is the diagnostic: if your open and closed numbers differ a lot at the tail and very little at the median, you have a queueing problem hiding behind a closed-loop test. If they differ at both, you also have a throughput ceiling problem.</p>
+<h2>How to actually configure an open-loop test</h2>
+<p>The good news is that the major modern load testers all support open-loop generation. You just have to ask for it explicitly, because the defaults are almost always closed-loop. A few that I have used:</p>
+<ul>
+<li><code>wrk2</code>, written specifically by Gil Tene to address coordinated omission. Pass <code>-R &lt;rate&gt;</code> and it will fire at that rate regardless of response time and record latency including the would-be wait.</li>
+<li><code>k6</code> has <code>constant-arrival-rate</code> and <code>ramping-arrival-rate</code> executors. The default <code>constant-vus</code> executor models a fixed pool of looping virtual users, which is closed-loop in effect for single-request scenarios. The arrival-rate executors are open-loop.</li>
+<li><code>vegeta</code> is open-loop by default. <code>vegeta attack -rate=8000/s -duration=60s</code> does the right thing without ceremony.</li>
+<li><code>Gatling</code> has <code>constantUsersPerSec</code> and <code>rampUsersPerSec</code>. Its <code>constantConcurrentUsers</code> and <code>rampConcurrentUsers</code> are closed-loop (the <code>injectClosed</code> model); the open-model injection steps include <code>atOnceUsers</code>, <code>rampUsers</code>, <code>constantUsersPerSec</code>, and <code>rampUsersPerSec</code> (<a href="https://docs.gatling.io/concepts/injection/">docs.gatling.io/concepts/injection/</a>).</li>
+</ul>
+<p>Here is the same benchmark rewritten in <code>k6</code> as an open-loop test:</p>
+<pre><code class="hljs language-javascript">// nightly_bench_open.js
+import http from &#39;k6/http&#39;;
+
+export const options = {
+  scenarios: {
+    real_traffic: {
+      executor: &#39;constant-arrival-rate&#39;,
+      rate: 8000,           // 8000 requests/sec, regardless of latency
+      timeUnit: &#39;1s&#39;,
+      duration: &#39;60s&#39;,
+      preAllocatedVUs: 500,  // pool to draw from
+      maxVUs: 4000,          // ceiling if service gets slow
+    },
+  },
+  thresholds: {
+    http_req_duration: [&#39;p(99)&lt;50&#39;], // this is what we actually care about
+  },
+};
+
+export default function () {
+  http.get(&#39;http://dovetail.internal/cards?user=42&#39;);
+}</code></pre>
+<p>Three things to notice. First, <code>rate</code> is in requests per second, not virtual users. Second, <code>preAllocatedVUs</code> and <code>maxVUs</code> are a pool the executor can draw from when the service slows down. Set <code>maxVUs</code> high enough that the generator never becomes the bottleneck (a good rule of thumb: at least <code>rate * worst_acceptable_latency_seconds * 4</code>). This is Little&#39;s law (VUs = rate * latency) with a 4x safety factor; if latency triples during a degradation you still have generator headroom. Third, the threshold is on response time, which now includes queue wait.</p>
+<p>If you have to stay in a closed-loop tool for organizational reasons, <code>wrk2</code> will at least correct the recorded latencies by back-filling synthetic samples when a response takes longer than the inter-arrival interval. Its README frames this as &quot;constant throughput, correct latency recording&quot; and Coordinated Omission correction, measuring latency &quot;from the time the transmission should have occurred&quot; and tracking both corrected and &quot;uncorrected&quot; histograms (<a href="https://github.com/giltene/wrk2">github.com/giltene/wrk2</a>). It is not as good as a real open-loop test, but it is dramatically better than a naive closed-loop one.</p>
+<h2>The diagnostic checklist</h2>
+<p>If you inherit a load test and want to know whether it is lying to you, here is what to check, roughly in order of how much time it saves:</p>
+<ol>
+<li>Look at the tool invocation. Is it <code>vus</code>, <code>concurrency</code>, <code>threads</code>, or <code>clients</code>? Closed loop. Is it <code>rate</code>, <code>rps</code>, <code>arrival-rate</code>, or <code>qps</code>? Open loop.</li>
+<li>Check whether the test reports a target rate or an achieved rate. Closed-loop tools usually report achieved rate, because the rate is whatever the service let them have. Open-loop tools report both, and the gap between target and achieved is the first thing you should look at.</li>
+<li>Plot p50 against p99 over time. If they move together, you are measuring service time. If p99 spikes while p50 stays flat, you are measuring queue wait, which is the real signal.</li>
+<li>Compare the maximum response time to the test duration divided by the concurrency. In a closed-loop test, the max can never exceed the test duration (one worker can produce at most one outstanding slow request). If you see a max that is suspiciously close to that ceiling, your test was concurrency-bound.</li>
+</ol>
+<h2>When closed loop is actually correct</h2>
+<p>There is a narrow set of cases where closed-loop modeling is the right answer: when your real workload is also closed-loop. Internal RPC chains where a calling service has a strict connection pool and applies its own backpressure are genuinely closed-loop. Batch pipelines processing fixed-size chunks are closed-loop. A queue worker with <code>prefetch=N</code> is closed-loop with N.</p>
+<p>For these systems, a closed-loop test with <code>concurrency = real production concurrency</code> is the right model, and an open-loop test would overstate tail latency by simulating queue conditions that physically cannot occur.</p>
+<p>The mistake is using closed-loop tests for inherently open-loop workloads: anything user-facing, anything triggered by external events, anything fronting a CDN or a mobile app. If your service is on the receiving end of an arrival process, you have to test it with one.</p>
+<h2>What the <code>dovetail</code> team actually did</h2>
+<p>In our illustrative scenario, after the open-loop rerun produced the 340ms p99, the investigation was short. The GC log showed periodic ~200ms pauses. The fix was prosaic: switched the JVM flags, tuned the heap, and the open-loop p99 dropped by roughly an order of magnitude. The closed-loop p99 barely moved, which would have been mistaken for an unremarkable tuning win in the old benchmark. The real win, the dramatic improvement at the tail under realistic conditions, was only visible because the test was finally honest.</p>
+<p>The team also added a CI guard. The nightly benchmark now runs both models and fails if the open-loop p99 exceeds 50ms or if the gap between closed and open p99 exceeds 3x. The second check is the more interesting one: it catches new queueing pathologies before they have a chance to hurt anybody, even if the absolute number still looks fine.</p>
+<p>Run your load test both ways at least once. If the numbers agree, you have learned something. If they disagree, you have learned something more important: which of them was answering the question your users will be asking.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

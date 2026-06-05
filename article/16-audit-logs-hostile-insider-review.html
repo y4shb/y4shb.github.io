@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Designing audit logs that survive a hostile insider review - Yash Bhardwaj</title>
+<meta name="description" content="Append-only is not the same as tamper-evident, and your SRE knows where the log volume is mounted">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/16-audit-logs-hostile-insider-review.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Designing audit logs that survive a hostile insider review - Yash Bhardwaj">
+<meta property="og:description" content="Append-only is not the same as tamper-evident, and your SRE knows where the log volume is mounted">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/16-audit-logs-hostile-insider-review.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Designing audit logs that survive a hostile insider review - Yash Bhardwaj">
+<meta name="twitter:description" content="Append-only is not the same as tamper-evident, and your SRE knows where the log volume is mounted">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Designing audit logs that survive a hostile insider review","datePublished":"2026-04-12","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/16-audit-logs-hostile-insider-review.html"},"url":"https://y4shbhardwaj.com/article/16-audit-logs-hostile-insider-review.html","description":"Append-only is not the same as tamper-evident, and your SRE knows where the log volume is mounted","keywords":"security, audit, logs"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">security</span><span class="chip">audit</span><span class="chip">logs</span></div></div><div class="meta-bottom"><span class="meta-read">11 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Apr 12, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Designing audit logs that survive a hostile insider review</h1>
+<p><em>append-only is not the same as tamper-evident, and your SRE knows where the log volume is mounted</em></p>
+<p>The fiction every audit log tells is that writing <code>event_type=permission.grant</code> to a file called <code>audit.log</code> constitutes evidence. It does not. It constitutes a string in a file that anyone with root on the host, write access to the log bucket, or a cooperative DBA can edit, truncate, or quietly delete a single line from with <code>sed -i</code>. When the question nine months later is &quot;did Priya actually grant herself prod-write at 03:14 on a Saturday, or did someone else do it from her session,&quot; a plain text log answers neither half.</p>
+<p>This post is about building audit logs that hold up when the threat model includes someone on your own team. Not the cartoon insider with a hoodie. The much more common case: a senior engineer with legitimate prod access, a deadline, and a reason to make a thing they did look like a thing the system did. The defenses are not exotic. They are mostly about removing the assumption of trust from places it snuck in.</p>
+<h2>What an audit log actually has to answer</h2>
+<p>Forget the schema for a minute. The auditor sitting in a conference room nine months after the incident has four questions, in this order:</p>
+<ol>
+<li><strong>Who did this.</strong> Not which service account. Which human, via which session, from which device.</li>
+<li><strong>What changed, exactly.</strong> Before-value and after-value, not a verb.</li>
+<li><strong>What else happened in the same causal chain.</strong> If <code>role.assigned</code> fires, what API call triggered it, what session opened that call, what auth event opened that session.</li>
+<li><strong>Can I trust these records.</strong> If the answer to this is &quot;well, we have backups,&quot; you have already lost the audit.</li>
+</ol>
+<p>A surprising number of &quot;audit systems&quot; answer (1) with a service principal, (2) with an event name and no diff, (3) with nothing because there is no correlation ID, and (4) with a shrug. You can ship an entire SIEM and still miss all four.</p>
+<h2>Actor versus subject: stop conflating them</h2>
+<p>The single most common schema mistake is one <code>user_id</code> field. Consider a permission change in a multi-tenant system:</p>
+<ul>
+<li>A platform engineer named Marcus, logged into the admin console via SSO session <code>sess_8af2</code>, calls an endpoint that grants the <code>billing.read</code> role to user <code>u_991</code> in tenant <code>t_acme</code>, acting on a support ticket filed by <code>u_991</code> themselves.</li>
+</ul>
+<p>That event has four distinct identities:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>actor.principal</code></td>
+<td><code>marcus@example.com</code></td>
+<td>The human who initiated</td>
+</tr>
+<tr>
+<td><code>actor.session_id</code></td>
+<td><code>sess_8af2</code></td>
+<td>The auth context they used</td>
+</tr>
+<tr>
+<td><code>actor.on_behalf_of</code></td>
+<td><code>u_991</code></td>
+<td>Delegated authority, if any</td>
+</tr>
+<tr>
+<td><code>subject.principal</code></td>
+<td><code>u_991</code></td>
+<td>The entity changed</td>
+</tr>
+<tr>
+<td><code>subject.tenant</code></td>
+<td><code>t_acme</code></td>
+<td>Scope of the change</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Now suppose six months later Marcus claims his account was compromised. With a single <code>user_id</code> field you cannot distinguish &quot;Marcus did it&quot; from &quot;something acting as Marcus did it.&quot; With <code>actor.session_id</code> you can join to the auth log and see the IP, the device fingerprint, the MFA method, and whether the session predates the alleged compromise. Without it you are guessing.</p>
+<p>The same separation matters for service-to-service calls. The actor is the service account; the <code>on_behalf_of</code> is the end user whose request triggered the chain. Auditors care about the latter. Ops cares about the former. Store both.</p>
+<h2>The hash chain, done correctly</h2>
+<p>Append-only buys you nothing if your insider has shell access. The standard fix is a hash chain: each entry carries a hash of the previous entry, so deleting or modifying any record breaks every record after it. The concept goes back to Bellare-Yee (1997) and Schneier-Kelsey (1999), well over two decades old, and implementations are still routinely wrong (<a href="https://www.schneier.com/wp-content/uploads/2016/02/paper-auditlogs.pdf">https://www.schneier.com/wp-content/uploads/2016/02/paper-auditlogs.pdf</a>).</p>
+<p>A minimal correct entry:</p>
+<pre><code class="hljs language-python">import hashlib
+import json
+from datetime import datetime, timezone
+
+def make_entry(prev_hash: str, payload: dict, signing_key) -&gt; dict:
+    entry = {
+        &quot;seq&quot;: payload[&quot;seq&quot;],
+        &quot;ts&quot;: datetime.now(timezone.utc).isoformat(),
+        &quot;prev_hash&quot;: prev_hash,
+        &quot;payload&quot;: payload,
+    }
+    # Canonical serialization is the whole game here.
+    # json.dumps(sort_keys=True, separators=(&quot;,&quot;,&quot;:&quot;)) is deterministic within
+    # Python, but it differs from RFC 8785 JCS on float formatting and Unicode
+    # escaping, so for cross-language verifiers use a JCS library
+    # (https://www.rfc-editor.org/rfc/rfc8785.html).
+    canonical = json.dumps(entry, sort_keys=True, separators=(&quot;,&quot;, &quot;:&quot;))
+    digest = hashlib.sha256(canonical.encode()).digest()
+    entry_hash = digest.hex()
+    entry[&quot;entry_hash&quot;] = entry_hash
+    # Sign the raw hash bytes, not the hex string, so verifiers in other
+    # languages do not have to know about the encoding dance.
+    entry[&quot;signature&quot;] = signing_key.sign(digest).hex()
+    return entry</code></pre>
+<p>Three things that look like nitpicks but are not:</p>
+<p><strong>Canonical serialization.</strong> If two writers produce the same logical entry but one has <code>{&quot;a&quot;:1,&quot;b&quot;:2}</code> and the other has <code>{&quot;b&quot;: 2, &quot;a&quot;: 1}</code>, their hashes differ. Pick canonical JSON or CBOR and enforce it in one library that everyone uses. Do not let each service hand-roll its own serialization.</p>
+<p><strong>Sign the hash, not the payload.</strong> The hash is fixed-size and cheap to sign. The signature proves the entry existed at write time; the chain proves nothing in front of it has moved. The next entry&#39;s <code>prev_hash</code> is set to this entry&#39;s <code>entry_hash</code> (the signature is metadata, not part of the chain link), so a verifier only needs the hashes to walk the chain.</p>
+<p><strong>The signing key does not live on the box that writes logs.</strong> If the same host that calls <code>make_entry</code> also holds the private key, an attacker with root on that host can forge entries indefinitely. The write path should send to a dedicated signer (HSM, KMS, or a small isolated service whose only job is &quot;sign this hash&quot;). Yes, this introduces latency. Yes, you should do it anyway for security-sensitive events. For high-volume non-security events, batch and sign roots of Merkle trees instead.</p>
+<h2>Write-only sinks: the unsexy half</h2>
+<p>The chain proves tampering. It does not prevent it. For prevention you need a sink that the writer cannot delete from. Concrete options, ranked by how much your insider has to defeat:</p>
+<pre><code>weakest                                                strongest
+   |                                                        |
+   v                                                        v
+[ local file ] -&gt; [ central log host ] -&gt; [ object store    ] -&gt; [ append-only
+   root can       compromise the         with object lock      log service in
+   sed -i         central host           and bucket policy     a second AWS
+                                         denying delete         account ]</code></pre>
+<p>The &quot;second account&quot; pattern is underrated. If your primary infra runs in account <code>prod-12345</code>, create <code>audit-99887</code> with its own IAM, its own break-glass, and a one-way pipe: prod can write, prod cannot read or delete, and only a two-person quorum from a security team can touch the bucket. An insider with full root on prod still cannot reach back and edit yesterday&#39;s entries. This is also where you put the public verification keys, so the prod host that signs entries cannot rotate the key that verifies them.</p>
+<p>S3 Object Lock in compliance mode gives you the bucket-level half of this: neither the bucket owner nor the AWS root user can shorten retention or delete a locked object version before expiry. The cross-account isolation gives you the IAM half.</p>
+<h2>Correlation IDs, or: how to find the one useful event</h2>
+<p>Here is the running example. Six months ago, customer <code>t_acme</code> claims an internal user saw their billing data without permission. You have three services involved: <code>gateway</code>, <code>identity</code>, and <code>billing-api</code>. Each writes its own audit stream. Total event volume across the three: 4.2 billion entries for the window in question.</p>
+<p>Without a correlation ID, you are searching across three log stores for events involving <code>t_acme</code> and hoping the timestamps line up close enough to reconstruct a causal chain. They won&#39;t. NTP drift, batch flushes, and clock-skew on a misbehaving node will give you events that look out of order. You will spend two days writing join queries and produce a report that says &quot;probably.&quot;</p>
+<p>With a correlation ID propagated from the gateway through every downstream call, the query is one line: <code>correlation_id = &quot;req_4f8a2c&quot;</code>. You get back something like:</p>
+<pre><code>seq=88412901  ts=2025-11-14T03:14:02Z  svc=gateway
+  event=auth.session.resumed  actor.session=sess_8af2
+  correlation_id=req_4f8a2c
+
+seq=88412903  ts=2025-11-14T03:14:02Z  svc=gateway
+  event=http.request  method=POST path=/admin/roles
+  actor.principal=marcus@example.com correlation_id=req_4f8a2c
+
+seq=88412908  ts=2025-11-14T03:14:02Z  svc=identity
+  event=role.assigned  subject.principal=u_991
+  subject.tenant=t_acme role=billing.read
+  actor.principal=marcus@example.com correlation_id=req_4f8a2c
+  prev_hash=9c81...  entry_hash=b40e...
+
+seq=88412940  ts=2025-11-14T03:14:18Z  svc=billing-api
+  event=invoice.viewed  actor.principal=u_991
+  subject.tenant=t_acme correlation_id=req_4f8a2c</code></pre>
+<p>That is the entire timeline, and it took 200ms to retrieve. The <code>prev_hash</code> on the <code>role.assigned</code> entry is verifiable against the previous entry in the identity service&#39;s chain, which means if Marcus tries to claim &quot;that role grant never happened, your logs are wrong,&quot; you can hand the auditor the seventeen subsequent entries that all chain back through that one and ask them which of those eighteen records he would like to also dispute.</p>
+<p>The correlation ID does the linking. The chain does the proving. You need both.</p>
+<h2>Fields auditors actually ask for</h2>
+<p>After a few of these reviews you notice the same fields keep being the ones that are missing. A pragmatic minimum schema, beyond the actor/subject split above:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Why it matters</th>
+<th>Common mistake</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>correlation_id</code></td>
+<td>Reconstruct causal chains across services</td>
+<td>Generated per-service instead of propagated</td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td>Distinct from correlation; one per HTTP call</td>
+<td>Conflated with correlation_id</td>
+</tr>
+<tr>
+<td><code>actor.auth_method</code></td>
+<td>&quot;Was this a password, MFA, API key, or SSO?&quot;</td>
+<td>Logged as boolean <code>authenticated=true</code></td>
+</tr>
+<tr>
+<td><code>actor.source_ip</code></td>
+<td>Geo and ASN, when account is later disputed</td>
+<td>NAT&#39;d to the load balancer IP</td>
+</tr>
+<tr>
+<td><code>actor.device_fingerprint</code></td>
+<td>Distinguishes &quot;same user, same laptop&quot; vs &quot;same user, new device&quot;</td>
+<td>Not collected at all</td>
+</tr>
+<tr>
+<td><code>change.before</code> / <code>change.after</code></td>
+<td>The whole point of an audit log</td>
+<td>Only <code>event_type</code> is stored</td>
+</tr>
+<tr>
+<td><code>change.reason</code></td>
+<td>Free-text justification, required at write time</td>
+<td>Optional, therefore empty</td>
+</tr>
+<tr>
+<td><code>policy_version</code></td>
+<td>Which version of the rules was evaluated</td>
+<td>Implicit, therefore unknowable later</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The <code>change.reason</code> field is the one that always gets debated. Engineers hate being forced to type a justification when they&#39;re firefighting. Auditors love it because it converts &quot;this looks suspicious&quot; into &quot;this looks suspicious AND the reason field says &#39;fixing prod&#39; with no ticket link.&quot; Make it required for any privileged action and let the bypass be a separate logged event (&quot;reason field skipped, break-glass invoked&quot;).</p>
+<p>The <code>policy_version</code> field looks academic until the day someone asks &quot;was this action allowed under the policy that was in force at the time?&quot; If your policy engine is rev&#39;d weekly and you only log the decision, you cannot answer that. Log the version, log the input, log the output. Storage is cheap.</p>
+<h2>The verifier nobody writes</h2>
+<p>You have a chain. Who actually verifies it?</p>
+<p>If the answer is &quot;we&#39;d run a script if there was an incident,&quot; you have a chain that has never been verified, which means you do not know whether it is intact. The verification job should run continuously, on a host that is not the one writing logs, reading from the write-only sink, and alerting loudly when:</p>
+<ul>
+<li>An entry&#39;s <code>prev_hash</code> does not match the previous entry&#39;s <code>entry_hash</code>.</li>
+<li>An entry&#39;s signature does not verify against the published public key.</li>
+<li>Sequence numbers skip.</li>
+<li>Two entries claim the same sequence number.</li>
+<li>The chain stops advancing for longer than expected (insider stopped writing, not just stopped doing things).</li>
+</ul>
+<p>That last one is the subtle one. An attacker who cannot edit history can still stop writing while they do their work. Liveness alerts (entry rate dropped to zero on a service that should be active) catch the gap. Pair them with a heartbeat event from each writer every N seconds so you can distinguish &quot;service is idle&quot; from &quot;service stopped logging.&quot;</p>
+<h2>What to leave out</h2>
+<p>A few common additions that look like security and are not:</p>
+<ul>
+<li><strong>Encrypting audit logs at rest with a key the same insider can read.</strong> This protects against the laptop-in-a-bar threat, not the privileged insider threat. Useful for compliance checkboxes, useless for your actual threat model.</li>
+<li><strong>PII in audit events.</strong> You will end up legally obligated to delete entries that customers request, which breaks your chain. Reference PII by stable opaque IDs; keep the PII in a separately governed store that supports per-record deletion. Hash chains and GDPR right-to-erasure are fundamentally incompatible; design around it. A common pattern is crypto-shredding: encrypt subject references with per-subject keys and delete the key on erasure, which leaves the chain intact while making the PII unrecoverable.</li>
+<li><strong>Audit logs as the primary analytics source.</strong> Once people start running dashboards off audit data, every schema change becomes a six-team negotiation, and someone will propose &quot;let&#39;s just denormalize this one field.&quot; Audit logs are evidence, not telemetry. Keep them boring.</li>
+</ul>
+<h2>The smaller point</h2>
+<p>Most of what makes an audit log survive hostile review is not cryptography. It is the discipline of separating the actor from the subject, propagating one ID end-to-end, signing entries somewhere the writer cannot reach, and writing them somewhere the writer cannot delete from. The hash chain is the bow on top: it converts a suspicion of tampering into a mathematical claim, which is what an auditor actually wants to see in a report.</p>
+<p>The thing to internalize is that the design audience is not your future self trying to debug a thing. It is a stranger nine months from now, sitting across a table from your CISO, holding a printout of one event and asking &quot;how do you know this is real.&quot; Build for that conversation. The dashboards will work out.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

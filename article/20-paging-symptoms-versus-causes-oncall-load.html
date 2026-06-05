@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paging on symptoms versus causes without doubling oncall load - Yash Bhardwaj</title>
+<meta name="description" content="The textbook says page on symptoms. The textbook has never carried your pager">
+<meta name="author" content="Yash Bhardwaj">
+<link rel="canonical" href="https://y4shbhardwaj.com/article/20-paging-symptoms-versus-causes-oncall-load.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Paging on symptoms versus causes without doubling oncall load - Yash Bhardwaj">
+<meta property="og:description" content="The textbook says page on symptoms. The textbook has never carried your pager">
+<meta property="og:url" content="https://y4shbhardwaj.com/article/20-paging-symptoms-versus-causes-oncall-load.html">
+<meta property="og:image" content="https://y4shbhardwaj.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Paging on symptoms versus causes without doubling oncall load - Yash Bhardwaj">
+<meta name="twitter:description" content="The textbook says page on symptoms. The textbook has never carried your pager">
+<meta name="twitter:image" content="https://y4shbhardwaj.com/og.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/global.css">
+<link rel="stylesheet" href="/styles/content.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Paging on symptoms versus causes without doubling oncall load","datePublished":"2026-06-02","author":{"@id":"https://y4shbhardwaj.com/#person"},"publisher":{"@id":"https://y4shbhardwaj.com/#person"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://y4shbhardwaj.com/article/20-paging-symptoms-versus-causes-oncall-load.html"},"url":"https://y4shbhardwaj.com/article/20-paging-symptoms-versus-causes-oncall-load.html","description":"The textbook says page on symptoms. The textbook has never carried your pager","keywords":"oncall, alerting, sre"}</script>
+</head>
+<body class="reader-body">
+<div class="progress" id="progress"></div>
+<header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
+<main id="top"><article class="blog blog-wrap" id="article">
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">oncall</span><span class="chip">alerting</span><span class="chip">sre</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Jun 2, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Paging on symptoms versus causes without doubling oncall load</h1>
+<p><em>the textbook says page on symptoms. The textbook has never carried your pager</em></p>
+<p>The SRE canon is clear: page on user-visible symptoms, not on internal causes. Symptoms are stable, causes drift with every refactor, and a cause-based alert library decays into a graveyard of stale rules nobody trusts. So you write four SLO burn alerts on the four things users actually care about (login latency, checkout success rate, search p99, image upload throughput), and you sleep well.</p>
+<p>For about three weeks.</p>
+<p>Then the upstream message queue backs up one Tuesday morning, all four of those symptoms degrade simultaneously, and your phone fires four times in ninety seconds. You acknowledge them all, you find the queue, you fix the queue, and at the retro someone politely asks why we paged the human four times for one incident. You mumble something about &quot;well, they ARE four separate user-visible problems&quot; and everyone nods and nobody is happy.</p>
+<p>This is the symptom-paging tax. The textbook answer is correct but incomplete. The missing piece is a routing layer that knows which symptoms are downstream of which causes, suppresses the duplicate noise, and still keeps the symptom alert as the system of record for &quot;is the user actually unhappy.&quot; This post walks through how we built that for a backend with one obvious bottleneck (a job queue named <code>dispatcher-prime</code>) and four consumers that all degrade when it does. The math for why a single upstream produces correlated downstream burns lives in the correlated-dependency post in this series; this one is about what the pager should do once they fire.</p>
+<h2>What &quot;page on symptoms&quot; actually buys you</h2>
+<p>Before throwing it out, the reason for the rule is worth restating, because the fix has to preserve it.</p>
+<p>A cause-based alert (&quot;redis memory &gt; 80%&quot;) fires whether or not anyone cares. Most of the time nobody does, because the system has slack, the cache is warm, or that particular redis isn&#39;t on the hot path anymore after last quarter&#39;s refactor. You get woken up, you look, you go back to sleep. Repeat that twice a week and you stop looking. Now when it matters, the page is noise to you.</p>
+<p>A symptom alert (&quot;checkout p99 &gt; 2s for 10 minutes&quot;) fires only when users are actually being hurt. You always look. You always find something. The signal-to-noise ratio stays clean across years of code churn because users&#39; tolerance for slow checkouts does not depend on whether we still use redis.</p>
+<p>The trap is that one user-visible symptom is rarely independent of the others. A backend platform with shared infrastructure has fan-out: one DNS resolver, one database primary, one queue, one TLS-cert renewer. When the shared thing breaks, every downstream SLO burns at once. Symptom paging without coordination means N pages for one human-actionable incident.</p>
+<h2>The four-page Tuesday</h2>
+<p>Here is the system. Names are made up but the shape is common.</p>
+<pre><code>                     +------------------+
+                     |  dispatcher-prime |  (job queue)
+                     +---------+--------+
+                               |
+              +----------------+----------------+
+              |        |       |       |       |
+              v        v       v       v       v
+          checkout  search  upload  notif  reports
+           (SLO)    (SLO)   (SLO)  (none)  (SLO)</code></pre>
+<p>Four of the five consumers have user-facing SLOs and a burn-rate alert. The queue itself has internal metrics (depth, oldest-message age, consumer lag) but no SLO; nobody contracts on queue depth.</p>
+<p>When <code>dispatcher-prime</code> backs up past roughly 50k messages, the four SLO alerts fire in this order, separated by whatever each alert&#39;s evaluation window resolves to:</p>
+<ol>
+<li><code>checkout_burn_fast</code> (2-minute window, fires first because checkout is latency-sensitive)</li>
+<li><code>search_burn_fast</code> (3-minute window)</li>
+<li><code>upload_throughput_low</code> (5-minute window)</li>
+<li><code>reports_burn_slow</code> (10-minute window)</li>
+</ol>
+<p>The oncall gets four pages spread over eight minutes. By page two they&#39;ve already opened the queue dashboard and figured it out. Pages three and four arrive while they&#39;re typing in the incident channel. The actual work was one investigation. The pager fired four times.</p>
+<p>Over a quarter, the team measured that 60% of weekly pages were duplicates of this shape: one upstream issue fanning out to multiple SLO alerts that all needed to fire (because the SLOs are real and users were being hurt) but only needed to wake one human. That 60% is the duplicate ratio in the page stream, not yet a claim about what&#39;s achievable; the achieved reduction number comes later.</p>
+<h2>What does NOT work</h2>
+<p>The instinct is to disable the noisier symptom alerts and &quot;just page on the queue.&quot; This rebuilds the cause-alert graveyard, slowly. Two refactors from now, the queue isn&#39;t on the critical path for <code>reports</code> anymore, but the queue alert still fires and wakes someone for nothing.</p>
+<p>The other instinct is to write &quot;compound&quot; alerts (&quot;checkout burning AND queue deep -&gt; page; checkout burning AND queue fine -&gt; different page&quot;). This explodes combinatorially. With 4 symptoms and 6 plausible causes you write 24 alerts, each of which has its own bugs, and you still don&#39;t catch the cause you didn&#39;t think of.</p>
+<p>The third instinct, popular in Prometheus shops, is <code>inhibit_rules</code> in Alertmanager: if alert X is firing, suppress alert Y. This is closer, but the default ergonomics suppress the symptom (the thing you want) in favor of the cause (the thing you don&#39;t trust). And it doesn&#39;t help the post-incident review, because the suppressed symptoms vanish from the timeline.</p>
+<h2>Cause-claims-symptoms routing</h2>
+<p>The pattern we landed on has three pieces, deliberately separated:</p>
+<ol>
+<li><strong>Symptom alerts stay as is.</strong> They remain the system of record for &quot;is the user unhappy.&quot; They fire into the alerting system, they get recorded, they appear on SLO dashboards, they are never disabled or muted by routing logic.</li>
+<li><strong>Cause alerts can claim symptoms.</strong> A cause alert (e.g. <code>dispatcher_prime_backlog_high</code>) declares which symptoms it expects to cause. When the cause fires, it grabs ownership of those symptoms for a suppression window.</li>
+<li><strong>Routing pages once per claimed group.</strong> If a symptom alert fires and is currently claimed by an active cause, the symptom is recorded but not paged. The cause page is the one that wakes the human, and it carries a list of the claimed symptoms in its body so the responder knows what they&#39;re really dealing with.</li>
+</ol>
+<p>The critical inversion: the cause alert is the one that pages, but the symptom alerts are still the source of truth. If no cause has claimed a symptom when it fires, the symptom pages normally. Cause alerts are an optimisation on top of symptom paging, not a replacement for it.</p>
+<p>Here&#39;s the routing rule shape, as we deploy it (this is a simplified version of our real config, but the structure is what we actually use):</p>
+<pre><code class="hljs language-yaml"># claim rules: cause alerts that suppress downstream symptoms
+claims:
+  - cause: dispatcher_prime_backlog_high
+    claims_symptoms:
+      - checkout_burn_fast
+      - checkout_burn_slow
+      - search_burn_fast
+      - upload_throughput_low
+      - reports_burn_slow
+    window: 15m
+    grace_after_clear: 5m
+    notify:
+      page: oncall-platform
+      include_claimed: true   # symptom list appears in page body
+
+  - cause: primary_db_replication_lag_high
+    claims_symptoms:
+      - reports_burn_slow         # reports reads from replicas
+      - search_burn_fast          # search index refresh reads replicas
+    window: 20m
+    grace_after_clear: 10m
+    notify:
+      page: oncall-data
+      include_claimed: true</code></pre>
+<p>The semantics:</p>
+<ul>
+<li>When <code>dispatcher_prime_backlog_high</code> fires, it opens a 15-minute claim on the five listed symptoms.</li>
+<li>During the claim window, if any claimed symptom fires, it is recorded in the incident timeline but does NOT page. A note is attached: &quot;suppressed by active cause: dispatcher_prime_backlog_high.&quot;</li>
+<li>When the cause clears, the claim stays open for <code>grace_after_clear</code> (5 minutes) to ride out delayed symptom resolution. After that, symptoms page normally again.</li>
+<li>If a claimed symptom is still firing past the grace window, it pages then, because at that point the cause is gone but the symptom isn&#39;t, and that&#39;s a separate problem worth waking someone for.</li>
+</ul>
+<p>Budget burns regardless of suppression. A sustained issue that exceeds the grace window will eventually page on the lingering symptom anyway, so the human still finds out about a real ongoing outage; they just don&#39;t get notified four times in the first minute.</p>
+<p>The same symptom can be claimed by multiple causes. <code>search_burn_fast</code> shows up under both <code>dispatcher_prime_backlog_high</code> and <code>primary_db_replication_lag_high</code> because search depends on both the index-update queue and the replica it reads from. Whichever cause fires first owns the claim. If both fire, the page bodies list each other so the responder doesn&#39;t need to chase the relationship.</p>
+<h2>What the responder sees</h2>
+<p>Before:</p>
+<pre><code>03:14 PAGE: checkout_burn_fast (p99 = 2.4s, threshold 2.0s)
+03:15 PAGE: search_burn_fast (p99 = 1.8s, threshold 1.5s)
+03:16 ACK checkout_burn_fast
+03:16 ACK search_burn_fast
+03:18 PAGE: upload_throughput_low
+03:19 ACK upload_throughput_low
+03:22 PAGE: reports_burn_slow
+03:22 ACK reports_burn_slow</code></pre>
+<p>After:</p>
+<pre><code>03:14 [recorded, suppressed] checkout_burn_fast
+03:15 [recorded, suppressed] search_burn_fast
+03:16 PAGE: dispatcher_prime_backlog_high (depth = 62k, oldest = 4m)
+              suppressed symptoms: checkout_burn_fast, search_burn_fast
+              expected symptoms (claimed, not yet firing): upload_throughput_low, reports_burn_slow
+03:16 ACK dispatcher_prime_backlog_high
+03:18 [recorded, suppressed] upload_throughput_low
+03:22 [recorded, suppressed] reports_burn_slow</code></pre>
+<p>One ack. Same information. The incident timeline still has all four symptom firings (the SLO dashboards still see them, the postmortem still has the user-impact data), but the human got one notification instead of four.</p>
+<p>The key UX point is that &quot;expected but not yet firing&quot; line. The router computes it by cross-referencing the <code>claims_symptoms</code> list for the active cause against the set of currently firing alerts; anything in the list that isn&#39;t firing right now gets annotated as expected. If only two of the four expected symptoms ever fire, that&#39;s data: maybe <code>reports</code> decoupled from the queue at some point and we didn&#39;t update the claim list. Stale claim rules become visible instead of silent.</p>
+<h2>Mechanics: where the routing lives</h2>
+<p>A few places this can sit. We put it in the alert router (we use a small custom Alertmanager fork, but you could implement the same logic in PagerDuty event rules with some pain or in a thin sidecar between Prometheus and your pager).</p>
+<p>The cause alerts are written and stored like any other alert. The claim relationships live in a separate file that&#39;s reviewed alongside SLO changes, so adding or removing claims is a deliberate act. Schema looks roughly like this in our case:</p>
+<pre class="mermaid">flowchart LR
+  prom[Prometheus] --&gt;|alerts| router[Claim Router]
+  router --&gt;|cause + claimed list| pager[PagerDuty]
+  router --&gt;|all firings| timeline[Incident Timeline DB]
+  router --&gt;|symptom firings + resolutions| slo[SLO Dashboard]
+  rules[(claims.yaml)] --&gt; router</pre>
+<p>The router does three things per incoming alert:</p>
+<ol>
+<li>Record the firing in the timeline DB regardless of routing decision.</li>
+<li>Update SLO budget burn based on symptom firings (suppression does not stop the budget from burning, because the user impact is real).</li>
+<li>Decide whether to page: if it&#39;s a cause, always page. If it&#39;s a symptom, check active claims and page only if uncovered.</li>
+</ol>
+<p>The persistence detail matters. If the router restarts mid-incident, it needs to know which claims are still open. We keep claim state in a small SQLite file on the router host, written on every claim open/close, and recover on startup. A claim that started before a restart is honoured for its remaining window. The SQLite file lives on that one host, so a process restart is fine but a host loss restarts claim state from empty; for HA, replicate the file or move state to a shared store, or accept that during the failover window you fall back to raw symptom paging.</p>
+<h2>Tuning the windows</h2>
+<p>The <code>window</code> and <code>grace_after_clear</code> numbers are the levers. We landed on these by looking at incident histories:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Cause</th>
+<th>Median time-to-symptom</th>
+<th>Median time-to-clear-after-fix</th>
+<th>Window</th>
+<th>Grace</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>dispatcher_prime_backlog_high</td>
+<td>2m</td>
+<td>3m</td>
+<td>15m</td>
+<td>5m</td>
+</tr>
+<tr>
+<td>primary_db_replication_lag_high</td>
+<td>5m</td>
+<td>8m</td>
+<td>20m</td>
+<td>10m</td>
+</tr>
+<tr>
+<td>edge_dns_resolver_errors_high</td>
+<td>30s</td>
+<td>1m</td>
+<td>10m</td>
+<td>3m</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The window has to be longer than the longest symptom evaluation window plus typical time-to-symptom. The grace has to be longer than the typical time for SLO burn-rate alerts to stop firing after the underlying issue clears, and that time depends on which alert shape you use. In a single-window burn-rate alert, recovery is governed by the lookback window and takes roughly that long to clear. In the now-standard multi-window multi-burn-rate (MWMBR) setup recommended by the SRE Workbook (<a href="https://sre.google/workbook/alerting-on-slos/">sre.google/workbook/alerting-on-slos</a>), the short window is typically 1/12 of the long (the canonical fast-burn pair is 1h/5m), so recovery is governed by that 5-minute short window. Either way, grace has to be set longer than the recovery time.</p>
+<p>Set the grace too short and you double-page on the tail: cause clears, claim expires, symptom is still in its smoothing window, symptom pages, human is annoyed. Set it too long and a genuinely separate failure during the grace window gets swallowed. We err generous and revisit when the data says we should.</p>
+<h2>What this is NOT</h2>
+<p>This is not &quot;alert correlation&quot; in the AIOps sense, where a machine learning model groups alerts by hidden similarity. Those systems are real and some are good, but they&#39;re opaque, expensive to maintain, and hard to argue with at 4am when you think it suppressed something it shouldn&#39;t have. Claim rules are deliberately dumb: a human wrote down &quot;this cause produces these symptoms&quot; and that&#39;s what the router enforces. When it&#39;s wrong, the fix is one diff to one yaml file.</p>
+<p>It&#39;s also not a way to avoid having symptom alerts. The symptom alerts still exist, still record, still burn SLO budget, still appear on dashboards. The router only affects whether the human&#39;s phone rings. Anyone evaluating &quot;are users being hurt right now&quot; should look at symptoms, not at whether a cause page fired.</p>
+<h2>The 60% number, honestly</h2>
+<p>The duplicate ratio in the page stream was 60% before claim rules; after deploying them the actual page volume dropped by roughly 60% over the following quarter, which is what you&#39;d expect if claims caught most of the duplicates and did not over-suppress real incidents. The two 60s line up because they&#39;re measuring the same population from opposite sides. That number is worth contextualising: it&#39;s specific to a backend where the job queue and the primary database between them account for a large share of incidents. A more fanned-out architecture would see a smaller win because fewer symptoms cluster under fewer causes. If your incidents are all weird one-offs, claim rules give you nothing because there&#39;s nothing to claim. The pattern pays off when you have a small number of high-fan-out shared resources whose failure modes are recurring.</p>
+<p>The other honest caveat: claim rules add a thing that can be wrong. A claim list that doesn&#39;t match reality (because a service got refactored) will either over-suppress (real incidents get hidden) or under-suppress (you&#39;re back to four pages). The &quot;expected but not firing&quot; diagnostic in the page body is the only thing that keeps the claims honest over time, and even then it depends on a human noticing. We review claim files quarterly. Anything that hasn&#39;t claimed anything in 90 days gets a &quot;is this still real?&quot; comment in the PR.</p>
+<h2>What you keep</h2>
+<p>The textbook rule survives, lightly amended. Page on symptoms, because symptoms are what matter. But route the pages through a layer that knows which symptoms are children of which causes, and let the cause alert be the one that fires the pager when it can. The symptoms still happen, still get recorded, still burn the budget, still appear in the postmortem. The human just gets to find out about the incident once.</p>
+</div>
+</article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script type="module">
+import { hydratePrebaked } from '/scripts/content.js';
+hydratePrebaked();
+if (document.querySelector('#content .mermaid')) {
+  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
+}
+</script>
+</body></html>

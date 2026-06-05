@@ -93,7 +93,7 @@ document.querySelectorAll('[data-tabs]').forEach(group => {
       p.classList.toggle('is-active', on);
       p.hidden = !on;
     });
-    // notify the experience visual which tab is active (die runs on AMD only)
+    // notify the experience visual which tab is active (mainboard runs on AMD only)
     document.dispatchEvent(new CustomEvent('exp:tab', { detail: { name } }));
   };
   // initialize roving tabindex on load: selected tab = 0, others = -1
@@ -184,9 +184,17 @@ const vizObserver = new IntersectionObserver(async entries => {
 }, { rootMargin: '120px' });
 mounts.forEach(m => vizObserver.observe(m));
 
-// Release every WebGL context (experience, divider, proj-dcauto, proj-sherlog)
+// Late-mounted nodes (projects-list.js renders the tier-1 cards after fetching
+// /projects/_index.json) ask both observers to pick them up via this event.
+document.addEventListener('projects:mounted', e => {
+  const detail = e && e.detail ? e.detail : {};
+  (detail.viz || []).forEach(node => vizObserver.observe(node));
+  (detail.reveal || []).forEach(node => revealObserver.observe(node));
+});
+
+// Release every WebGL context (hero, exp-mainboard, proj-gpu, proj-dcauto, proj-sherlog)
 // at end of page lifecycle. Sections that define dispose() free their GL context;
-// those that do not simply fall through. pagehide covers bfcache + unload.
+// those that do not, fall through. pagehide covers bfcache + unload.
 addEventListener('pagehide', () => {
   instances.forEach(inst => { if (inst && inst !== 'loading') inst.dispose?.(); });
 }, { once: true });

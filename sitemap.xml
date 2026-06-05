@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://y4shbhardwaj.com/</loc><lastmod>2026-06-03</lastmod><changefreq>weekly</changefreq><priority>1.0</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/01-websocket-command-broker-long-lived-agents.html</loc><lastmod>2025-11-04</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/02-crash-only-design-for-test-rigs.html</loc><lastmod>2025-11-12</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/03-why-your-healthcheck-endpoint-lies.html</loc><lastmod>2025-11-19</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/04-idempotency-keys-for-deploy-endpoints.html</loc><lastmod>2025-12-02</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/05-job-lifecycle-as-a-finite-state-machine.html</loc><lastmod>2025-12-08</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/06-streaming-live-logs-without-websockets.html</loc><lastmod>2025-12-21</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/07-reverse-tunnel-agents-for-unreachable-hosts.html</loc><lastmod>2026-01-06</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/08-ras-telemetry-into-actionable-signals.html</loc><lastmod>2026-01-09</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/09-hot-shard-pitfalls-keying-by-hostname.html</loc><lastmod>2026-01-15</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/10-cancellation-and-cleanup-in-long-running-workers.html</loc><lastmod>2026-01-28</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/11-bisecting-flaky-tests-statistical-scoring.html</loc><lastmod>2026-02-11</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/12-expand-contract-schema-migrations-busy-tables.html</loc><lastmod>2026-02-17</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/13-deadline-propagation-across-service-hops.html</loc><lastmod>2026-03-02</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/14-adaptive-concurrency-limits-gradient-littles-law.html</loc><lastmod>2026-03-19</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/15-exactly-once-myth-idempotency-buys-you.html</loc><lastmod>2026-04-04</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/16-audit-logs-hostile-insider-review.html</loc><lastmod>2026-04-12</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/17-error-budget-math-correlated-dependencies.html</loc><lastmod>2026-04-24</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/18-cli-subcommand-hierarchies-twenty-verbs.html</loc><lastmod>2026-05-08</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/19-load-test-open-versus-closed-workload.html</loc><lastmod>2026-05-21</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/article/20-paging-symptoms-versus-causes-oncall-load.html</loc><lastmod>2026-06-02</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://y4shbhardwaj.com/project/dcauto.html</loc><lastmod>2026-06-03</lastmod><changefreq>monthly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://y4shbhardwaj.com/project/sherlog.html</loc><lastmod>2026-06-03</lastmod><changefreq>monthly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://y4shbhardwaj.com/project/qsc.html</loc><lastmod>2026-06-03</lastmod><changefreq>monthly</changefreq><priority>0.8</priority></url>
+</urlset>
