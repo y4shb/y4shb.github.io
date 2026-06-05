@@ -19,8 +19,8 @@ const ADV = 0.6; // mono glyph advance (width/height): used for grid rows + cove
 // High-res column count, scaled down on narrow viewports for performance.
 function pickCols() {
   const w = window.innerWidth || 1280;
-  if (w < 480) return 96;
-  if (w < 820) return 128;
+  if (w < 480) return 48;
+  if (w < 820) return 64;
   return 162;
 }
 
@@ -373,7 +373,7 @@ export default function init(mount, ctx) {
     // Cover fit: glyph grid fills the container (to the bottom edge); overflow is
     // clipped (.hv2-ascii has overflow:hidden). Grid aspect matches the box, so this
     // is an exact fill with negligible clip.
-    const size = Math.max(7, Math.max(w / (cols * ADV), h / rows));
+    const size = Math.max(w / (cols * ADV), h / rows);
     ascii.style.fontSize = size + 'px';
     ascii.style.lineHeight = size + 'px';
     const min = Math.min(w, h);
