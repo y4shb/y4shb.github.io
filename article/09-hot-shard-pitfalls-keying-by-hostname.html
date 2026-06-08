@@ -35,41 +35,41 @@
 <div class="progress" id="progress"></div>
 <header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
 <main id="top"><article class="blog blog-wrap" id="article">
-<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">sharding</span><span class="chip">kafka</span><span class="chip">scaling</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Jan 15, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Hot-shard pitfalls when you key by hostname</h1>
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">sharding</span><span class="chip">kafka</span><span class="chip">scaling</span></div></div><div class="meta-bottom"><span class="meta-read">13 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Jan 15, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Hot-shard pitfalls when you key by hostname</h1>
 <p><em>a short tour through the day your evenly-sharded topic stops being evenly sharded</em></p>
-<p>Last Tuesday at 14:07, <code>host-prod-a-1471</code> started emitting 20 times its usual event volume. Nothing else changed: same topic, same producer code, same consumer group. By 14:09 one partition out of 24 was carrying 70% of the bytes, and the per-host state machine draining that partition fell three minutes behind and kept falling. Every team eventually ships a pipeline keyed by <code>hostname</code> and hits the same skew problem on a quiet Tuesday.</p>
-<p>How you spot the hot partition, why the first three things you will try make it worse, and what actually fixes it.</p>
+<p>Last Tuesday at 14:07, <code>host-prod-a-1471</code> started emitting 20 times its usual event volume. Nothing else changed: same topic, same producer code, same consumer group. By 14:09 one partition out of 24 carried 70% of the bytes, and the per-host state machine draining it fell three minutes behind and kept falling. Every team eventually ships a pipeline keyed by <code>hostname</code> and hits the same skew problem on a quiet Tuesday.</p>
+<p>Three terms first. A <strong>partition</strong> is one of the parallel logs a Kafka topic is split into; it is the unit of both storage and parallelism. A message&#39;s <strong>key</strong> decides which partition it lands in. A <strong>consumer group</strong> is a set of consumer processes sharing the work of a topic, and the rule that matters: within a group, each partition is read by exactly one consumer. That rule is why keying gives you ordering. Kafka only guarantees order <em>within</em> a partition, so to process all of one host&#39;s events in order on one thread, you make them all land in one partition. Keying by hostname does that. It also means a single hot partition cannot be split across consumers, which is the trap.</p>
+<p>This is how you spot the hot partition, why the first three things you will try make it worse, and what actually fixes it.</p>
 <h2>Why hostname-keying is so seductive</h2>
-<p>The promise of partition-by-key is per-key ordering. If every event from <code>host-prod-a-1471</code> lands in the same partition, you process them in order with a single consumer thread: per-host state machines, sequence-number dedup, incremental aggregation without cross-consumer coordination. Clean. Cheap. The producer code is one line:</p>
+<p>The promise of partition-by-key is per-key ordering: every event from <code>host-prod-a-1471</code> lands in the same partition, so you process them in produce order with a single consumer thread: per-host state machines, sequence-number dedup, incremental aggregation without cross-consumer coordination. The producer code is one line:</p>
 <pre><code class="hljs language-python">producer.send(
     topic=&quot;host-events&quot;,
     key=event[&quot;hostname&quot;].encode(),
     value=json.dumps(event).encode(),
 )</code></pre>
-<p>Kafka&#39;s <code>DefaultPartitioner</code> hashes the key with murmur2 and takes it mod the partition count: literally <code>toPositive(Utils.murmur2(keyBytes)) % numPartitions</code> (see the <a href="https://github.com/apache/kafka/blob/3.2.0/clients/src/main/java/org/apache/kafka/clients/producer/internals/DefaultPartitioner.java">DefaultPartitioner source</a>; librdkafka uses the same scheme for <code>partitioner=murmur2_random</code>). The event lands in a deterministic partition, and because a Kafka partition is consumed by exactly one consumer within a group, you get a clean single-threaded drain per key. Here is the flow:</p>
-<pre><code>event.hostname  -&gt;  murmur2(keyBytes)  -&gt;  hash % 24  -&gt;  partition N  -&gt;  one consumer thread
-   &quot;host-1471&quot;        0x9F3A12C7              7              P7              consumer-c</code></pre>
-<p>As long as your hostnames are roughly uniformly distributed across the fleet, your partitions stay roughly balanced. The keyword is &quot;as long as.&quot;</p>
+<p>How the partition gets chosen: Kafka&#39;s <code>DefaultPartitioner</code> runs the key bytes through murmur2, a fast non-cryptographic hash (chosen for speed and even spread, not security), then takes that hash modulo the partition count: literally <code>toPositive(Utils.murmur2(keyBytes)) % numPartitions</code> (see the <a href="https://github.com/apache/kafka/blob/3.2.0/clients/src/main/java/org/apache/kafka/clients/producer/internals/DefaultPartitioner.java">DefaultPartitioner source</a>; librdkafka uses the same scheme for <code>partitioner=murmur2_random</code>). The same key always hashes to the same partition: one ordered stream per key, drained single-threaded.</p>
+<p>A good hash spreads keys evenly regardless of what the names look like, so name distribution is not what you worry about. What keeps partitions balanced is the <em>traffic per host</em> being roughly even: as long as no host is dramatically chattier than the rest, the per-host streams smooth out across partitions. The keyword is &quot;as long as.&quot;</p>
 <h2>The day uniformity dies</h2>
-<p>You have 24 partitions and 4,000 hosts. Each partition gets traffic from ~165 hosts, and even if some are chattier than others, the average smooths out. P99 partition throughput sits maybe 1.4x the median, and nothing pages.</p>
-<p>Now consider three plausible scenarios that break this:</p>
+<p>You have 24 partitions and 4,000 hosts. Each partition gets traffic from ~165 hosts, and the average smooths out. To put a number on &quot;balanced&quot;: rank the partitions by throughput and compare the busiest to the median (the middle one). The busiest sits maybe 1.4x the median. A small busiest-to-median ratio means load is even and no single partition is close to falling behind, so nothing pages. That ratio comes back in the simulation as the single number that tells you whether a topic is healthy.</p>
+<p>Three plausible scenarios break this:</p>
 <ol>
-<li><p><strong>A regression storm.</strong> Someone merges a firmware change. On any host where that firmware loads, a driver fault loop kicks in and the host emits 5,000 errors per second instead of the normal 5. Suddenly twenty hosts are 1,000x noisier than the rest. Those twenty hosts are spread across maybe twelve partitions, but the four unlucky partitions that got multiple noisy hosts are now carrying 80% of the topic&#39;s bytes.</p>
+<li><p><strong>A regression storm.</strong> Someone merges a firmware change. On any host where it loads, a driver fault loop kicks in and the host emits 5,000 errors per second instead of the normal 5. Twenty hosts are now 1,000x noisier than the rest, spread across maybe twelve partitions, but the four unlucky partitions that got multiple noisy hosts now carry 80% of the topic&#39;s bytes.</p>
 </li>
-<li><p><strong>A long-running batch job.</strong> A pricing team kicks off a 48-hour reindex on a beefy box called <code>svc-pricing-12</code>. The job emits an audit event per row processed, the partition holding <code>svc-pricing-12</code> is suddenly carrying one host worth of data at a rate higher than the other 23 partitions combined.</p>
+<li><p><strong>A long-running batch job.</strong> A pricing team kicks off a 48-hour reindex on a beefy box called <code>svc-pricing-12</code>. The job emits an audit event per row processed, and the partition holding <code>svc-pricing-12</code> carries one host worth of data at a rate higher than the other 23 partitions combined.</p>
 </li>
-<li><p><strong>Naming convention drift.</strong> Half your hostnames now collapse into a low-cardinality prefix because someone deployed a fleet of identical short-lived workers all named <code>worker-pool-a</code>. The hash of that single key wins the partition lottery for one partition, and that partition now serves the entire worker pool.</p>
+<li><p><strong>Naming convention drift.</strong> Someone deploys a fleet of identical short-lived workers all named <code>worker-pool-a</code>. Thousands of distinct machines now emit under one key, so the hash maps every one to a single partition that serves the entire worker pool. The problem is collapsed cardinality, not an unlucky hash.</p>
 </li>
 </ol>
 <p>In every one of these, the partition count is fine, the hash is fine, the consumer hardware is fine. The data distribution is what broke.</p>
 <h2>Spotting the hot partition</h2>
-<p>The first sign is almost never &quot;partition X is hot.&quot; It is &quot;consumer lag is rising on consumer group Y.&quot; Someone then looks at per-partition lag and notices it is concentrated. Your dashboard has to have per-partition lag, not just aggregate. If you only watch aggregate, you mistake a hot-shard problem for a &quot;consumer too slow&quot; problem, which leads to the second mistake: scaling up the consumer.</p>
-<p>Useful broker-side metrics, in rough order of usefulness:</p>
+<p>Two terms get used interchangeably and should not be. A <strong>hot partition</strong> carries far more than its share of traffic. A <strong>hot key</strong> is a single key carrying far more than its share of one partition&#39;s traffic. The fixes diverge: a hot partition from many noisy keys can be relieved by spreading keys, but one caused by a single hot key cannot, because that key is pinned to one partition.</p>
+<p>The first sign is almost never &quot;partition X is hot.&quot; It is &quot;consumer lag is rising on group Y,&quot; and a look at per-partition lag shows it is concentrated. Your dashboard has to have per-partition lag, not just aggregate. Watch only aggregate and you mistake a hot-shard problem for &quot;consumer too slow,&quot; which leads to the second mistake: scaling up the consumer.</p>
+<p>Useful broker-side metrics, in rough order of usefulness. (Kafka exposes these over JMX; each metric is an MBean, a named object you query by the dotted string below.)</p>
 <ul>
-<li>Per-partition produce rate. Worth flagging: the stock JMX MBean <code>kafka.server:type=BrokerTopicMetrics,name=BytesInPerSec,topic=X</code> is per-topic, not per-partition, and there is no built-in per-partition variant. To get per-partition <code>BytesIn</code> you either compute log-dir size deltas (<code>kafka.log:type=Log,name=Size,topic=X,partition=Y</code> sampled over time) or run a custom collector that diffs per-partition end offsets. Most teams hunt for an MBean that does not exist; save yourself the search.</li>
+<li>Per-partition produce rate. The stock JMX MBean <code>kafka.server:type=BrokerTopicMetrics,name=BytesInPerSec,topic=X</code> is per-topic, and there is no built-in per-partition variant. To get per-partition <code>BytesIn</code> you either compute log-dir size deltas (<code>kafka.log:type=Log,name=Size,topic=X,partition=Y</code> sampled over time) or run a custom collector that diffs per-partition end offsets. Most teams hunt for an MBean that does not exist; save yourself the search.</li>
 <li><code>MessagesInPerSec</code> per topic, paired with per-partition end-offset deltas to separate &quot;one giant event&quot; from &quot;a flood of small events.&quot;</li>
 <li>Per-partition consumer lag (records, not bytes), via <code>kafka-consumer-groups.sh --describe</code> or <code>kafka.consumer:type=consumer-fetch-manager-metrics,name=records-lag,...</code>. What actually wakes you up.</li>
-<li>Producer-side key distribution. If you can sample produced keys for a minute and build a histogram, you instantly know whether one key is dominating.</li>
+<li>Producer-side key distribution. Sample produced keys for a minute and build a histogram, and you instantly know whether one key is dominating.</li>
 </ul>
 <p>Confirming the hot key from the consumer side:</p>
 <pre><code class="hljs language-python">from collections import Counter
@@ -81,10 +81,10 @@ for msg in consumer.poll(timeout_ms=5000).values():
 
 for key, n in counts.most_common(10):
     print(f&quot;{key!r}: {n}&quot;)</code></pre>
-<p>If the top key is doing 60% of the partition&#39;s volume, you have a hot key, not a hot partition. Those are different problems and they need different fixes.</p>
+<p>If the top key is doing 60% of the partition&#39;s volume, you have a hot key, not a hot partition, and the two need different fixes.</p>
 <h2>The three things you will try first, and why they all make it worse</h2>
-<p>When the page fires, the instinct is to redistribute. Three common moves either do nothing or make it worse:</p>
-<p><strong>Add partitions.</strong> Kafka lets you increase partition count on a topic, and this is worse than it sounds. When you go from 24 partitions to 48, the hash-mod changes for every key. For keyed messages using hash-mod partitioning (the default), Confluent is explicit that increasing partitions does not redistribute existing data and that new writes with the same key may land on a different partition, breaking per-key affinity at the alter boundary (<a href="https://docs.confluent.io/kafka/operations-tools/partition-determination.html">Kafka partition determination docs</a>). Concretely:</p>
+<p>When the page fires, the instinct is to redistribute. Three common moves do nothing or make it worse:</p>
+<p><strong>Add partitions.</strong> Kafka lets you increase partition count on a topic, and this is worse than it sounds. The reason is the modulo: <code>hash(K) % 24</code> and <code>hash(K) % 48</code> are two unrelated remainders of the same number, so doubling the partition count reshuffles where nearly every key lands. For keyed messages using hash-mod partitioning (the default), Confluent is explicit that increasing partitions does not redistribute existing data and that new writes with the same key may land on a different partition, breaking per-key affinity at the boundary (<a href="https://docs.confluent.io/kafka/operations-tools/partition-determination.html">Kafka partition determination docs</a>). Concretely:</p>
 <pre><code>key K = &quot;host-prod-a-1471&quot;
 murmur2(K) = 0x9F3A12C7
 
@@ -93,22 +93,22 @@ after  alter (48 partitions):   hash(K) % 48 = 19    -&gt; new writes on P19
 
 P5  [...older offsets, now stranded for ordering purposes...]
 P19 [new offsets, no idea P5 exists]</code></pre>
-<p>Old messages stay on partition 5, new messages from that same key land on 19, and you have lost per-key ordering at the boundary for every key in the topic. Meanwhile your hot key just picked a new partition to melt. You have broken ordering globally and fixed nothing locally.</p>
-<p>Even a full repartition (new topic, mirror data over) only helps if your hot keys are spread across the new space. If the noise is one host, that one host is still going to a single partition. Doubled broker overhead, same problem.</p>
-<p><strong>Add consumers.</strong> A single Kafka partition is consumed by exactly one consumer in a group. You can have 200 consumers in the group and the hot partition is still being drained by one of them. Adding consumers just means 199 of them are idle while one melts.</p>
-<p><strong>Switch to round-robin keying.</strong> This actually does flatten the partitions. It also destroys per-host ordering, which was the entire reason you chose hostname-keying. If your consumer assumes ordered per-host events (and it almost certainly does, even if nobody wrote that down), you have introduced a bug class that will not surface until a customer complains about a reordered state transition three weeks from now.</p>
-<p>So the trap is real. The naive fixes do nothing, do harm, or trade one problem for a worse one.</p>
+<p>Old messages stay on partition 5, new ones from that key land on 19, and you have lost per-key ordering at the boundary for every key in the topic. Meanwhile your hot key just picked a new partition to melt. You broke ordering globally and fixed nothing locally.</p>
+<p>Even a full repartition (new topic, mirror data over) only helps if your hot keys spread across the new space. If the noise is one host, that host still goes to a single partition. Doubled broker overhead, same problem.</p>
+<p><strong>Add consumers.</strong> A single Kafka partition is consumed by exactly one consumer in a group. You can have 200 consumers and the hot partition is still drained by one of them; the other 199 have no partition to read and sit idle.</p>
+<p><strong>Switch to round-robin keying.</strong> This does flatten the partitions. It also destroys per-host ordering, the entire reason you chose hostname-keying. If your consumer assumes ordered per-host events (it almost certainly does, even if nobody wrote that down), you have introduced a bug class that will not surface until a customer complains about a reordered state transition.</p>
+<p>So the trap is real: the naive fixes do nothing, do harm, or trade one problem for a worse one.</p>
 <h2>What actually works</h2>
 <p>Three patterns help, in roughly increasing order of complexity:</p>
 <h3>1. Composite keys</h3>
-<p>If <code>hostname</code> alone is too coarse, key by <code>(hostname, secondary_dimension)</code> where the secondary dimension is something that splits the chatty host&#39;s traffic without breaking the ordering you actually need.</p>
-<p>The classic example: error events from a single host often cluster around a specific subsystem. If <code>svc-pricing-12</code> is emitting 5,000 events per second but they are spread across 20 subsystems, then <code>(hostname, subsystem)</code> keys give you 20 distinct keys instead of 1. Hash collisions will collapse some of those onto the same partition, but you are no longer guaranteed to pin all 5,000 events to a single shard.</p>
+<p>If <code>hostname</code> alone is too coarse, key by <code>(hostname, secondary_dimension)</code> where the second dimension splits the chatty host&#39;s traffic without breaking the ordering you actually need.</p>
+<p>The classic example: error events from a single host often cluster around a specific subsystem. If <code>svc-pricing-12</code> emits 5,000 events per second spread across 20 subsystems, then <code>(hostname, subsystem)</code> keys give you 20 distinct keys instead of 1. Hash collisions will collapse some onto the same partition, but you no longer pin all 5,000 events to a single shard.</p>
 <pre><code class="hljs language-python">key = f&quot;{event[&#39;hostname&#39;]}|{event[&#39;subsystem&#39;]}&quot;.encode()
 producer.send(topic=&quot;host-events&quot;, key=key, value=...)</code></pre>
-<p>The catch: you have just changed your ordering guarantee. You now have per-(host, subsystem) ordering, not per-host ordering. Read your consumer carefully. If it does cross-subsystem state transitions per host, this breaks it. If it does not, you are fine.</p>
-<p>A concrete failure mode worth naming: a consumer that maintains a <code>last_seen[host]</code> state across subsystems. Before composite keying, every event for <code>host-prod-a-1471</code> arrived on the same partition in produce order, so the consumer could write <code>last_seen[&quot;host-prod-a-1471&quot;] = max(current, event.ts)</code> and trust it. After composite keying, <code>(host, subsystemA)</code> lands on P3 and <code>(host, subsystemB)</code> lands on P11, drained by two different consumer threads. Now an event from subsystemA at t=100 and one from subsystemB at t=99 arrive in either order. Your <code>last_seen</code> writes interleave, and any logic that fires on a transition (alerting when a host goes silent, deduping based on previous-state) gets non-deterministic answers. The bug class is &quot;cross-key invariants on what used to be a single-key stream.&quot; It will not show up in tests, only in incident postmortems six weeks out.</p>
+<p>You have changed your ordering guarantee to per-(host, subsystem), not per-host. Read your consumer carefully. If it does cross-subsystem state transitions per host, this breaks it. If it does not, you are fine.</p>
+<p>A concrete failure mode: a consumer that maintains <code>last_seen[host]</code> across subsystems. Before composite keying, every event for <code>host-prod-a-1471</code> arrived on the same partition in produce order, so the consumer could write <code>last_seen[&quot;host-prod-a-1471&quot;] = max(current, event.ts)</code> and trust it. After, <code>(host, subsystemA)</code> lands on P3 and <code>(host, subsystemB)</code> on P11, drained by two different consumer threads. An event from subsystemA at t=100 and one from subsystemB at t=99 now arrive in either order, the <code>last_seen</code> writes interleave, and any logic that fires on a transition (alerting when a host goes silent, deduping on previous-state) gets non-deterministic answers. The bug class is &quot;cross-key invariants on what used to be a single-key stream,&quot; and it surfaces in incident postmortems, never in tests.</p>
 <h3>2. Salt-then-bucket</h3>
-<p>When you genuinely need per-host ordering most of the time but want a safety valve for the pathological cases, salt the key with a small bounded fan-out.</p>
+<p>When you need per-host ordering most of the time but want a safety valve for the pathological cases, salt the key with a small bounded fan-out.</p>
 <pre><code class="hljs language-python">SALT_BUCKETS = 8
 
 def partition_key(event):
@@ -119,20 +119,46 @@ def partition_key(event):
         bucket = random.randint(0, SALT_BUCKETS - 1)
         return f&quot;{host}#{bucket}&quot;.encode()
     return host.encode()</code></pre>
-<p>This static version trades ordering for spread inside the bucket count and scatters every event from a hot host onto a random partition; use it only when downstream consumers can tolerate completely random scatter across <code>SALT_BUCKETS</code>. <code>HOT_HOSTS</code> is a small set, refreshed periodically from your metrics. Maybe it lives in a config map, maybe it is computed by a side process that watches per-partition rates and pushes the top offenders. The point is: 99% of your traffic gets clean per-host ordering, and the 1% of pathological hosts get fan-out, with the understanding that those hosts have temporarily lost their ordering guarantee.</p>
-<p>The consumer side has to know about this. Events from a salted host arrive on multiple partitions, so any per-host aggregation needs a reconciliation step. Often that is acceptable: the alternative is dropping events or melting one consumer.</p>
-<p>A variant I have seen work well: instead of a static <code>HOT_HOSTS</code> list, every event gets <code>host#bucket(host, time_window)</code> where the bucket is <code>0</code> for normal hosts and a hashed spread for hosts that have crossed a rate threshold in the last minute. Self-healing, no config push needed, and it falls back to single-bucket as soon as the spike subsides:</p>
+<p>The salted key still goes through the same <code>murmur2 % numPartitions</code>, so 8 salt buckets do not guarantee 8 distinct partitions; collisions can collapse some. This static version scatters every event from a hot host onto a random bucket, so use it only when consumers tolerate random scatter across <code>SALT_BUCKETS</code>. <code>HOT_HOSTS</code> is a small set, refreshed from your metrics. The point: 99% of traffic gets clean per-host ordering, and the 1% of pathological hosts get fan-out and temporarily lose their ordering guarantee.</p>
+<p>The consumer side has to know about this. Events from a salted host arrive on multiple partitions, so per-host aggregation needs a reconciliation step. Usually acceptable: the alternative is dropping events or melting one consumer.</p>
+<p>A variant that works well makes the fan-out <em>rate-aware</em>, which is what lets it self-heal. Instead of a static <code>HOT_HOSTS</code> list, every event gets <code>host#bucket(host, time_window)</code>, where the bucket is <code>0</code> for normal hosts and a hashed spread for hosts that crossed a rate threshold in the last minute. No config push needed:</p>
 <pre><code class="hljs language-python">def bucket(host, now):
     window = now // 60  # 60-second rolling window
     rate = rate_counter.get(host, window)  # events/sec from a sliding-window counter
     if rate &lt; HOT_THRESHOLD:
         return f&quot;{host}#0&quot;
     return f&quot;{host}#{hash((host, window)) % SALT_BUCKETS}&quot;</code></pre>
-<p>The <code>time_window</code> is what makes it self-healing: a host that goes hot at 14:07 spreads across <code>SALT_BUCKETS</code> for the duration of that minute, then if the spike subsides by 14:08 it collapses back to bucket 0 with no operator action. Consumers that need cross-bucket aggregation reconcile on the host key, not the salted key.</p>
+<p>The <code>now // 60</code> quantizes time into fixed 60-second windows, so every event in the same minute computes the same <code>window</code> and the salt is transient. The state diagram carries the rest:</p>
+<pre class="mermaid">stateDiagram-v2
+    [*] --&gt; Normal
+    Normal --&gt; Salted: rate &gt;= threshold
+    Salted --&gt; Salted: still hot in window
+    Salted --&gt; Normal: next window, rate below threshold
+    note right of Normal
+        key = host#0
+        ordered, single partition
+    end note
+    note right of Salted
+        key = host#hash
+        spread, ordering relaxed
+    end note</pre>
+<p>Two caveats. First, this only self-heals if <code>rate_counter</code> reflects the host&#39;s true fleet-wide rate. A per-process counter sees only one producer instance&#39;s events, so a host hot across many producers but quiet on each never trips the threshold; the counter has to be shared across producers for the &quot;no config push&quot; promise to hold. Second, the collapse back to bucket 0 is true only for <em>new writes</em>. Data written during the hot minute stays physically spread across <code>SALT_BUCKETS</code> until it ages out, so consumers must keep scanning all buckets for that historical window. That is why consumers reconcile on the host key, not the salted key.</p>
 <h3>3. Single partition, multiple consumer threads</h3>
-<p>Sometimes you cannot change the keying: downstream contracts, the consumer-owning team is on vacation, or the topic is shared with three other services on the current scheme. You can still parallelize the drain.</p>
-<p>The trick is to keep one Kafka consumer reading the hot partition, but hand records off to a thread pool keyed by a sub-dimension you control. As long as you keep the per-sub-key ordering, you can recover throughput without changing the topic at all.</p>
-<p>The offset-commit dance is the tricky part. If you commit naively after enqueueing, a crash mid-processing loses records. If you commit after each worker finishes, you can commit out of order and lose at-least-once semantics. The fix is a watermark commit: keep a sorted set of in-flight offsets per partition, and on a tick, commit the smallest offset that is fully drained. Here is the whole thing:</p>
+<p>Sometimes you cannot change the keying: downstream contracts, the consumer-owning team is unavailable, or the topic is shared with three other services on the current scheme. You can still parallelize the drain. Keep one Kafka consumer reading the hot partition, but hand records off to a thread pool keyed by a sub-dimension you control. Keep the per-sub-key ordering and you recover throughput without changing the topic at all.</p>
+<p>The offset-commit dance is the tricky part, and it turns on what delivery guarantee you want. <strong>At-least-once</strong> means a record may be processed more than once but never lost; <strong>exactly-once</strong> means processed precisely once, which is far harder and not what this pattern gives you. A committed offset in Kafka is the <em>next</em> offset to read: committing N tells the broker &quot;everything strictly below N is done, resume at N.&quot; Commit naively after enqueueing and a crash loses records the workers never finished; commit the highest finished offset and, since workers finish out of order, a crash skips a lower offset still in flight.</p>
+<p>The fix is a <strong>watermark commit</strong>: keep a sorted set of in-flight offsets per partition, and on each tick commit the smallest one still in flight. The sequence below shows the crash-replay path that makes this at-least-once, and why <code>process()</code> must be idempotent.</p>
+<pre class="mermaid">sequenceDiagram
+    participant P as Poll loop
+    participant W as Worker pool
+    participant C as Committer
+    participant K as Kafka
+    P-&gt;&gt;W: enqueue offsets 100..104
+    Note over W: 102 finishes first, 100 still running
+    W--&gt;&gt;C: 102 done
+    C-&gt;&gt;K: commit 100 (smallest in-flight)
+    Note over P,K: crash here
+    K--&gt;&gt;P: resend from 100
+    Note over W: 102 replays (idempotent process)</pre>
 <pre><code class="hljs language-python">import collections, threading, time
 from queue import Queue
 from sortedcontainers import SortedList  # pip install sortedcontainers; or use heapq with lazy deletion from the stdlib
@@ -142,6 +168,7 @@ queues = [Queue(maxsize=10_000) for _ in range(NUM_WORKERS)]
 
 # Per-partition set of offsets still being processed.
 inflight = collections.defaultdict(SortedList)
+last_seen = {}                      # highest offset polled per partition
 inflight_lock = threading.Lock()
 
 def worker(q):
@@ -161,11 +188,12 @@ def committer():
         time.sleep(1.0)
         commits = {}
         with inflight_lock:
-            for p, offsets in inflight.items():
-                # Safe commit point: lowest in-flight offset minus one.
-                # If nothing is in flight, commit the last seen offset.
-                if offsets:
-                    commits[p] = offsets[0]
+            for p, last in last_seen.items():
+                offsets = inflight[p]
+                # Commit point = next offset to read.
+                # If something is in flight, resume at the lowest in-flight offset.
+                # If nothing is in flight, resume just past the last polled offset.
+                commits[p] = offsets[0] if offsets else last + 1
         for p, off in commits.items():
             consumer.commit({p: off})
 
@@ -174,11 +202,12 @@ threading.Thread(target=committer, daemon=True).start()
 for record in consumer:
     with inflight_lock:
         inflight[record.partition].add(record.offset)
+        last_seen[record.partition] = record.offset
     sub_key = record.value[&quot;subsystem&quot;]
     idx = hash(sub_key) % NUM_WORKERS
     queues[idx].put(record)</code></pre>
-<p>A couple of things to notice. The committer commits the smallest in-flight offset, not the largest completed one, which is what gives you at-least-once: on crash, you replay everything from the watermark forward, including some records that finished. Your <code>process()</code> has to be idempotent. The sorted set is per-partition because Kafka commits are per-partition. And the lock is coarse, fine for hundreds of thousands of records per second; if you push past that, shard the in-flight tracking per partition.</p>
-<p>The consumer knobs that actually matter for this pattern, with their defaults from the Java client (<a href="https://docs.confluent.io/platform/current/installation/configuration/consumer-configs.html">consumer configs reference</a>):</p>
+<p>The committer commits the smallest in-flight offset, not the highest finished one, which is what gives you at-least-once. When nothing is in flight it commits <code>last + 1</code>, so a fully-drained partition does not get re-read from the start. The sorted set is per-partition because Kafka commits are per-partition. The lock is coarse, fine for hundreds of thousands of records per second; past that, shard the in-flight tracking per partition.</p>
+<p>The consumer knobs that matter for this pattern, with their defaults from the Java client (<a href="https://docs.confluent.io/platform/current/installation/configuration/consumer-configs.html">consumer configs reference</a>):</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -212,7 +241,7 @@ for record in consumer:
 </table>
 </div>
 <h2>A tiny simulation</h2>
-<p>To make this concrete, here is a 30-line throughput simulation. One run with hostname keying where one host is 50x noisier, one run with <code>host#bucket</code> salting on the noisy host.</p>
+<p>A throughput simulation: one run with hostname keying where one host is 50x noisier, one with <code>host#bucket</code> salting on that host. (It uses Python&#39;s <code>hash()</code> rather than murmur2; any uniform hash illustrates skew.)</p>
 <pre><code class="hljs language-python">import collections, random, statistics
 
 NUM_PARTITIONS = 24
@@ -250,22 +279,15 @@ def report(label, c):
 
 report(&quot;plain &quot;, plain)
 report(&quot;salted&quot;, salted)</code></pre>
-<p>On my laptop the plain run at <code>NOISY_FACTOR=50</code> gives roughly <code>max=110,000 p50=82,000 ratio=1.3x</code>. That 1.3x is not the true baseline; it is baseline-with-mild-skew, and the noisy host is already dominating the worst partition even at 50x. Set <code>NOISY_FACTOR=1</code> and the same code produces something close to <code>ratio=1.08x</code>, which is what 24-partition uniform distribution actually looks like. Push <code>NOISY_FACTOR</code> higher and the ratio climbs roughly linearly with the noisy host&#39;s share of traffic; the salted run flattens the worst case back to a small multiple of the median even at the higher factor. The salted run also moves the median <em>up</em>, because the noisy host&#39;s traffic is now contributing to many partitions instead of starving one. That second-order effect is easy to miss but it is the whole reason this works: a balanced topic does more aggregate work than an unbalanced one with the same hardware.</p>
-<p>ASCII version of the same idea, before and after, partition fill:</p>
-<pre><code>plain:                              salted:
-P0   ##                             P0   ####
-P1   ##                             P1   ####
-...                                 ...
-P11  ################ &lt;- hot key    P11  #####
-...                                 ...
-P23  ##                             P23  ####</code></pre>
+<p>On my laptop the plain run at <code>NOISY_FACTOR=50</code> gives roughly <code>max=110,000 p50=82,000 ratio=1.3x</code>. Set <code>NOISY_FACTOR=1</code> and the same code produces <code>ratio=1.08x</code>, what 24-partition uniform distribution looks like, so that 1.3x is already mild skew with the noisy host tainting the worst partition. Push <code>NOISY_FACTOR</code> higher and the ratio climbs roughly linearly with the noisy host&#39;s share; the salted run flattens the worst case back to a small multiple of the median even at the higher factor.</p>
+<p>The salted run also moves the median <em>up</em>, and that second-order effect is the whole reason this works. An unbalanced topic pins one partition at its drain limit while the other 23 sit half-idle, hardware you are paying for and not using. Spreading the noisy host&#39;s traffic means no single partition is starved, so the same hardware does more aggregate work.</p>
 <h2>What to keep in the broker-ops drawer</h2>
-<p>This runbook is for the person with broker shell access at 02:00, not the consumer team. The commands assume Kafka, adapt for your flavor.</p>
+<p>This runbook is for the person with broker shell access at 02:00, not the consumer team. The commands assume Kafka; adapt for your flavor.</p>
 <ul>
-<li><code>kafka-consumer-groups.sh --bootstrap-server $B --group $G --describe</code>: confirm the lag is on one or two partition columns, not spread evenly. If it is even, your problem is downstream, stop reading this post.</li>
-<li><code>kafka-run-class.sh kafka.tools.GetOffsetShell --topic $T --time -1</code> against the live offsets minute over minute gives you per-partition produce rate without leaving the broker host. Useful when your metrics pipeline is the thing that is on fire.</li>
-<li>A 30-second consumer dump from the hot partition with <code>kafka-console-consumer.sh --partition $P --property print.key=true</code>, piped through <code>awk &#39;{print $1}&#39; | sort | uniq -c | sort -rn | head</code>. If the top key owns more than 30% of the dump, you have a hot key, not a hot partition.</li>
-<li>Resist the urge to write a reassignment JSON and run <code>kafka-reassign-partitions.sh</code> while the spike is live. The tool relocates replica log directories across brokers but does not change the producer-side <code>murmur2(key) % N</code> mapping (<a href="https://strimzi.io/blog/2022/09/16/reassign-partitions/">Strimzi reassignment overview</a>), and the replication traffic will make the hot broker hotter. Reassignment is for &quot;this broker is overloaded across many partitions,&quot; not &quot;this partition is hot.&quot;</li>
+<li><code>kafka-consumer-groups.sh --bootstrap-server $B --group $G --describe</code>: confirm the lag is on one or two partition columns, not spread evenly. If it is even, your problem is downstream.</li>
+<li><code>kafka-run-class.sh kafka.tools.GetOffsetShell --topic $T --time -1</code> against the live offsets minute over minute gives per-partition produce rate without leaving the broker host. Useful when your metrics pipeline is the thing on fire.</li>
+<li>A 30-second consumer dump from the hot partition with <code>kafka-console-consumer.sh --partition $P --property print.key=true</code>, piped through <code>awk &#39;{print $1}&#39; | sort | uniq -c | sort -rn | head</code>. Top key over 30% of the dump means a hot key, not a hot partition.</li>
+<li>Resist the urge to write a reassignment JSON and run <code>kafka-reassign-partitions.sh</code> to fix <em>this</em>. The tool reassigns partition replicas across brokers; it does not touch the producer-side <code>murmur2(key) % N</code> mapping covered above (<a href="https://strimzi.io/blog/2022/09/16/reassign-partitions/">Strimzi reassignment overview</a>). So it cannot rebalance load <em>inside</em> a single hot partition; that needs more partitions, a different key, or a custom partitioner. Worse, the catch-up replication during a move reads from the source broker that is already melting, so reassigning mid-spike makes the hot broker hotter. It is the right tool for &quot;this broker is overloaded across many partitions,&quot; and even then only once the spike has passed.</li>
 <li>If the spike is going to persist past your patience, push the salting fallback for the offending keys at the producer, not the broker. Brokers have no opinions about your keys.</li>
 <li>Once the spike is gone, archive the per-partition rate graph and the top-key dump into the incident doc. The next hot partition will look exactly like this one, and you will not remember the threshold you used.</li>
 </ul>
@@ -278,7 +300,7 @@ import { hydratePrebaked } from '/scripts/content.js';
 hydratePrebaked();
 if (document.querySelector('#content .mermaid')) {
   const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
-  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a', noteBkgColor:'#141414', noteTextColor:'#8a8f98', noteBorderColor:'#2a2a30', actorBkg:'#141414', actorBorder:'#2a2a30', actorTextColor:'#ededed', signalColor:'#8a8f98', signalTextColor:'#ededed' }});
   try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
 }
 </script>

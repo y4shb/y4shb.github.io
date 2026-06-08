@@ -35,27 +35,24 @@
 <div class="progress" id="progress"></div>
 <header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
 <main id="top"><article class="blog blog-wrap" id="article">
-<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">networking</span><span class="chip">ssh</span><span class="chip">agents</span></div></div><div class="meta-bottom"><span class="meta-read">10 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Jan 6, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Reverse-tunnel agents for hosts you cannot reach</h1>
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">networking</span><span class="chip">ssh</span><span class="chip">agents</span></div></div><div class="meta-bottom"><span class="meta-read">13 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Jan 6, 2026</span></div></div><div id="content" data-prebaked="1"><h1>Reverse-tunnel agents for hosts you cannot reach</h1>
 <p><em>patterns for boxes you cannot SSH into directly</em></p>
-<p>You ship a customer appliance. It sits in their datacenter, behind their firewall, on a VLAN that drops inbound TCP on the floor. Your support contract says you will push firmware updates and pull diagnostic logs on demand. You cannot SSH in. You cannot port-forward to it. The customer&#39;s security team will not poke a hole for you, and you do not want them to.</p>
+<p>You ship a customer appliance. It sits in their datacenter, behind their firewall, on a VLAN that drops inbound TCP on the floor, behind NAT that hides it behind one shared public address. The practical consequence: no port on any public IP maps back to your box, so a connection you start from outside has nowhere to land. Your support contract says you will push firmware updates and pull diagnostic logs on demand. You cannot SSH in. You cannot port-forward to it. The customer&#39;s security team will not poke a hole for you, and you do not want them to.</p>
 <p>What you can do is have the appliance dial out:</p>
 <pre><code class="hljs language-bash">ssh -N -R 2200:localhost:22 tunnel@relay.example.net</code></pre>
-<p>That one line is the seed of the whole pattern. The appliance opens an outbound SSH connection to a relay you own, and asks the relay to forward port 2200 back down the channel. From now on, anyone who can reach the relay can SSH into the appliance through port 2200. Inbound from the customer&#39;s perspective is still firmly blocked; from yours, the appliance might as well have a public IP.</p>
+<p>Two flags carry this line. <code>-N</code> means &quot;do not run a remote command, just hold the connection open&quot; (we want the tunnel, not a shell). <code>-R 2200:localhost:22</code> is a <em>reverse</em> port forward: it asks the far end (the relay) to listen on port 2200 and pipe anything that arrives there back down this connection to the appliance&#39;s local port 22.</p>
+<p>Here is the insight that makes the pattern work: an established TCP connection is bidirectional, and the firewall only blocks <em>new</em> inbound connections, never packets belonging to a connection already in flight. Once the appliance has dialed out and the SSH session is up, &quot;inbound-feeling&quot; traffic to port 2200 is just bytes traveling back along a connection the appliance itself opened. Anyone who can reach the relay can now SSH into the appliance through port 2200. Inbound from the customer&#39;s perspective is still firmly blocked; from yours, the appliance might as well have a public IP.</p>
 <p>The interesting part is everything that happens after you scale it past five machines and try to keep it alive for months.</p>
 <h2>The basic shape</h2>
 <p>You have three roles:</p>
-<pre><code>   +-----------+        +-----------+        +-----------+
-   |  client   |        |  relay    |        |   agent   |
-   |  (you)    | -----&gt; |  (you)    | &lt;----- |  (them)   |
-   +-----------+        +-----------+        +-----------+
-                         port 2200             behind NAT</code></pre>
-<p>The <strong>agent</strong> is the unreachable box. It runs something like:</p>
-<pre><code class="hljs language-bash">ssh -N -R 2200:localhost:22 tunnel@relay.example.net</code></pre>
-<p>The <code>-R 2200:localhost:22</code> tells the relay: &quot;open port 2200 on yourself, and any TCP connection that lands there, send it back down this SSH channel to my local port 22.&quot; Now from the relay, you can do <code>ssh -p 2200 root@localhost</code> and you are talking to the agent.</p>
-<p>The <strong>relay</strong> is a small VM you own that has a public IP and accepts SSH on 22 from anywhere you allow. It does not run anything special. It is just a TCP rendezvous point with a stable address. Treat it as cattle, not pets. Sizing is modest: an idle sshd is roughly 5 to 8 MB RSS, so a 512 MB VM comfortably holds a few thousand idle tunnels with headroom for the kernel and your supervisor. CPU is a non-issue until you start running heavy traffic through the channels.</p>
-<p>The <strong>client</strong> is your CI runner, your laptop, or any system that wants to push commands to the agent. It SSHes into the relay, then either chains another SSH from there, or uses <code>ProxyJump</code>:</p>
+<pre class="mermaid">flowchart LR
+    client[&quot;client (you)&quot;] --&gt; relay[&quot;relay (you) port 2200&quot;]
+    agent[&quot;agent (them) behind NAT&quot;] --&gt; relay</pre>
+<p>The <strong>agent</strong> is the unreachable box. It runs the <code>ssh -N -R 2200:localhost:22 tunnel@relay.example.net</code> line above. The <code>-R</code> tells the relay: &quot;open port 2200 on yourself, and any TCP connection that lands there, send it back down this SSH channel to my local port 22.&quot; With sshd&#39;s default <code>GatewayPorts no</code>, the relay binds that forwarded port to loopback only, so port 2200 answers from the relay itself but not from arbitrary external hosts. That is exactly what you want, because clients reach the agent by hopping through the relay, and the final hop runs <em>on the relay</em>, where loopback resolves.</p>
+<p>The <strong>relay</strong> is a small VM you own with a public IP that accepts SSH on 22 from anywhere you allow. It runs nothing special: a TCP rendezvous point with a stable address, cattle not pets, so you can destroy and recreate it from config rather than hand-nurse a snowflake. Sizing is modest. Each connected agent forks a per-connection sshd child, roughly 5 to 8 MB RSS (resident set size, the physical memory the process holds) when idle. That figure misleads for aggregate planning, because forked sshd children share their code, libc, and libcrypto pages copy-on-write. RSS counts those shared pages in <em>every</em> child even though the kernel pays for them once. Plan instead against the private dirty pages each child adds (roughly its PSS, proportional set size). So a few thousand idle tunnels in 512 MB is achievable but optimistic, and depends entirely on sharing. CPU is a non-issue until you run heavy traffic through the channels.</p>
+<p>The <strong>client</strong> is your CI runner, your laptop, or any system that wants to push commands to the agent. It uses <code>ProxyJump</code>:</p>
 <pre><code class="hljs language-bash">ssh -J tunnel@relay.example.net -p 2200 root@localhost</code></pre>
-<p>That is the basic pattern. Everything else is what running it in production teaches you.</p>
+<p><code>-J</code> (ProxyJump) tells SSH to first connect to the jump host, then open the real connection <em>from there</em>. From the relay&#39;s vantage point the agent lives at <code>localhost:2200</code>, the loopback port the relay forwards down the channel, so <code>-p 2200 root@localhost</code> evaluated on the relay lands on the agent. That is the basic pattern. Everything else is what running it in production teaches you.</p>
 <h2>Managing the connection from the wrong side</h2>
 <p>The first non-obvious thing: the agent is the only party that can establish the tunnel. The relay cannot dial out and create one. So whatever process manages the tunnel must live on the unreachable side, which means you cannot just push it a new config and bounce it. You have to design it to recover from its own mistakes.</p>
 <p>A systemd unit on the agent is the lightest reasonable thing that works:</p>
@@ -78,17 +75,13 @@ User=tunnel
 
 [Install]
 WantedBy=multi-user.target</code></pre>
-<p>Two SSH-specific gotchas that the generic &quot;let the supervisor restart it&quot; advice does not cover:</p>
-<p><code>ExitOnForwardFailure=yes</code> matters here. When the SSH process dies uncleanly, the previous remote forward can linger on the relay for tens of seconds because the relay&#39;s sshd has not yet noticed the parent connection is gone. When the agent reconnects, the <code>-R 2200</code> bind fails silently and SSH cheerfully holds open a tunnel with no remote forward attached. <code>ExitOnForwardFailure=yes</code> makes SSH treat that as fatal and exit, so the supervisor restarts it instead of leaving you with a zombie tunnel that &quot;is up&quot; but unreachable. Without this option, you will spend an afternoon debugging. One caveat worth knowing: this option only fires when the bind itself fails. It does not catch PermitOpen denials, downstream TCP failures, or a network that simply stops carrying packets (see <code>ssh_config(5)</code>).</p>
-<p>The second gotcha is that the relay&#39;s sshd needs <code>ClientAliveInterval</code> / <code>ClientAliveCountMax</code> set, or it will hold those zombie bound ports until Linux&#39;s default TCP keepalive kicks in, which is 7200 seconds, two hours (<code>tcp_keepalive_time</code>, see <code>man 7 tcp</code>). Set it to 30 / 3 to match the agent side, so both ends agree on how long a missing keepalive means dead. The agent-side <code>ServerAliveInterval</code> / <code>ServerAliveCountMax</code> follow the same math: detection window is roughly <code>interval * count</code>, so 30 * 3 gives you about 90 seconds.</p>
-<p><code>autossh</code> is fine if you like belt-and-suspenders, but with <code>ExitOnForwardFailure</code> plus a sane supervisor, it does not add much.</p>
+<p>Two SSH-specific gotchas the generic &quot;let the supervisor restart it&quot; advice does not cover.</p>
+<p><code>ExitOnForwardFailure=yes</code> matters here. When the SSH process dies uncleanly, the relay&#39;s bound listener on port 2200 lingers for tens of seconds, because the relay&#39;s sshd has not yet noticed the parent connection is gone. When the agent reconnects, the new <code>-R 2200</code> bind fails because the old listener still owns the port, and by default SSH cheerfully holds the tunnel open anyway with no working remote forward attached. That is the zombie tunnel: the SSH connection is up, the agent thinks it published a port, but nothing on the relay routes to it, so every client connection hangs. <code>ExitOnForwardFailure=yes</code> makes SSH treat a bind failure as fatal and exit, so the supervisor restarts it. One caveat: this option only fires when the bind itself fails. It does not catch PermitOpen denials, downstream TCP failures, or a network that simply stops carrying packets (see <code>ssh_config(5)</code>).</p>
+<p>The second gotcha involves two <em>different</em> keepalive mechanisms at different layers, and conflating them is the trap. The first is SSH&#39;s own application-level keepalive: the SSH process sends probe messages and gives up after a set count, and each side only watches the other. The agent&#39;s <code>ServerAliveInterval</code>/<code>ServerAliveCountMax</code> detect a dead <em>relay</em>; the relay&#39;s <code>ClientAliveInterval</code>/<code>ClientAliveCountMax</code> detect a dead <em>agent</em>. You need both, because neither side probes itself. The second mechanism is the kernel&#39;s TCP keepalive, below SSH entirely. If you do not set the relay&#39;s <code>ClientAlive*</code> options, the relay&#39;s sshd holds those zombie bound ports until the kernel&#39;s TCP keepalive finally tears the dead socket down, and that default is glacial: <code>tcp_keepalive_time</code> is 7200 seconds, two hours, before the first probe even fires (<code>man 7 tcp</code>, which also documents <code>tcp_keepalive_probes</code> and <code>tcp_keepalive_intvl</code>). So do not wait for the kernel: set the relay&#39;s <code>ClientAliveInterval</code>/<code>ClientAliveCountMax</code> to 30 / 3 to match the agent side, so both ends agree that a missing keepalive for about 90 seconds (roughly <code>interval * count</code>) means dead.</p>
+<p><code>autossh</code> is fine if you like belt-and-suspenders, but with <code>ExitOnForwardFailure</code> plus a sane supervisor it does not add much.</p>
 <h2>The port allocation problem</h2>
 <p>If every agent forwards to port 2200, you can have exactly one agent. The fix is per-agent ports. The fix to the fix is to not hand-maintain a port map across a thousand machines.</p>
-<p>The pattern I have seen work: have each agent register itself at the relay on startup, get back a port, and then dial the tunnel with that port. Something like:</p>
-<pre><code>agent  -- HTTPS --&gt; registry.example.net:443
-       &lt;-- {port: 12047, expires: ...}
-agent  -- SSH -R 12047:localhost:22 --&gt; relay.example.net</code></pre>
-<p>The registry is a tiny service (a single Go binary, or a Lambda, whatever) that owns the port map. It keys ports by a stable agent ID, which is some hash of the machine&#39;s hardware identifier or a UUID you bake in at provision time. When the agent dies and comes back, it gets the same port. When a new agent registers, it gets the next free one.</p>
+<p>The pattern I have seen work: each agent registers itself at the relay on startup, gets back a port and an expiry, then dials the tunnel with that port (<code>ssh -R 12047:localhost:22 ...</code>). The registry is a tiny service (a single Go binary, or a Lambda, whatever) that owns the port map. It keys ports by a stable agent ID, some hash of the machine&#39;s hardware identifier or a UUID you bake in at provision time. When the agent dies and comes back, it gets the same port. When a new agent registers, it gets the next free one.</p>
 <p>A registry response is mostly boring:</p>
 <pre><code class="hljs language-json">{
   &quot;agent_id&quot;: &quot;bench-17&quot;,
@@ -98,7 +91,7 @@ agent  -- SSH -R 12047:localhost:22 --&gt; relay.example.net</code></pre>
   &quot;cert_expires_at&quot;: &quot;2026-06-10T00:00:00Z&quot;,
   &quot;last_seen_at&quot;: &quot;2026-06-03T11:42:08Z&quot;
 }</code></pre>
-<p>Encode that port into DNS if you can. <code>bench-17.tunnels.example.net</code> resolving to a TXT or SRV record with the port is much easier to use from CI than a JSON lookup. Stock OpenSSH does not consume SRV records on its own (tracked upstream as Bugzilla 2217 for over a decade); you will need a wrapper that resolves the record and rewrites the host:port before invoking <code>ssh</code>. The &quot;wrapper&quot; can be ten lines:</p>
+<p>Encode that port into DNS if you can. A DNS SRV record advertises a named service as <code>&lt;prio&gt; &lt;weight&gt; &lt;port&gt; &lt;target&gt;</code>, exactly the host-and-port pair you need, and that name becomes the single source of truth CI can resolve with a plain <code>dig</code> instead of teaching every tool to call a JSON API. The catch: stock OpenSSH does not consume SRV records on its own (tracked upstream as Bugzilla 2217 for over a decade), so you need a wrapper that resolves the record and rewrites the host:port before invoking <code>ssh</code>:</p>
 <pre><code class="hljs language-bash">#!/usr/bin/env bash
 # usage: tssh bench-17 [extra ssh args...]
 set -euo pipefail
@@ -111,60 +104,52 @@ relay=$(awk &#39;{sub(/\.$/,&quot;&quot;,$4); print $4}&#39; &lt;&lt;&lt;&quot;$
 exec ssh -J &quot;tunnel@${relay}&quot; -p &quot;$port&quot; root@localhost &quot;$@&quot;</code></pre>
 <p>TXT and SRV in DNS here are for your tooling to consume, not for SSH itself.</p>
 <h2>Key rotation without bricking the fleet</h2>
-<p>Here is the trap: the agent uses an SSH key to authenticate to the relay. That key sits on the agent. If you rotate the relay&#39;s <code>authorized_keys</code> and forget to update an agent, that agent is now permanently unreachable, because the only way you had to reach it was the tunnel you just broke.</p>
+<p>Here is the trap: the agent uses an SSH key to authenticate to the relay, and that key sits on the agent. If you rotate the relay&#39;s <code>authorized_keys</code> and forget to update an agent, that agent is now permanently unreachable, because the only way you had to reach it was the tunnel you just broke.</p>
 <p>Two rules.</p>
-<p>First, <strong>always overlap</strong>. New key gets added to <code>authorized_keys</code> before old key gets removed. Schedule the removal at least a full deployment cycle later. If you have agents that come online once a week (lab benches that get powered off on weekends, for example), the overlap window is at least two weeks.</p>
-<p>Second, <strong>use certificates, not raw keys</strong>. Generate an SSH CA, sign agent keys with it, and configure the relay&#39;s sshd with <code>TrustedUserCAKeys</code>. This is not a new toy: OpenSSH grew certificate-authority support in 5.4, released March 2010, so nearly every supported distro has it (ancient enterprise builds on pre-5.4 OpenSSH are the exception). Now rotating means signing a new cert and pushing it; the relay never needs to learn about individual agents at all. Certs can be short-lived (a week, a day) and the CA can revoke them.</p>
+<p>First, <strong>always overlap</strong>. New key gets added to <code>authorized_keys</code> before old key gets removed. Schedule the removal at least a full deployment cycle later. If you have agents that come online once a week (lab benches powered off on weekends, say), the overlap window is at least two weeks.</p>
+<p>Second, <strong>use certificates, not raw keys</strong>. SSH has its own certificate format (simpler than X.509/TLS certs, and not interchangeable with them): you generate an SSH CA (certificate authority) keypair once, sign each agent&#39;s public key with the CA to produce a short-lived certificate, and configure the relay&#39;s sshd with <code>TrustedUserCAKeys</code> pointing at the CA&#39;s <em>public</em> key. The before/after is the point. Before, the relay had to learn about each agent individually through <code>authorized_keys</code>. After, the relay only ever checks &quot;is this cert signed by my CA, and is it still valid?&quot; and never holds a per-agent key list. OpenSSH grew certificate-authority support in 5.4 (March 2010), so nearly every supported distro has it. Certs can be short-lived (a week, a day) and the CA can revoke them.</p>
 <pre><code class="hljs language-bash"># on the CA host
 ssh-keygen -s ca_key -I &quot;agent-bench-17&quot; -n tunnel \
     -V +1w agent_key.pub</code></pre>
-<p>The cert ends up next to the key on the agent, and SSH picks it up automatically. When it expires, the agent&#39;s next reconnect will fail until it fetches a new one, which should be a cron job pulling from the registry.</p>
-<p>The agent needs to be able to fetch new certs even when its tunnel is broken. That is, the cert-renewal path must not depend on the tunnel being healthy, because the whole reason the tunnel might be broken is the cert. Bootstrap that channel separately, over HTTPS to the registry with a separate credential.</p>
-<p>If your environment is locked down enough that the agent&#39;s <em>only</em> outbound is SSH to the relay (common in customer-appliance and air-gap-adjacent setups), you cannot bootstrap cert renewal over HTTPS at all. In that case, push fresh certs <em>through</em> the tunnel itself well before the existing cert expires, and overlap aggressively. A cert that lives a week, renewed every two days, gives you five days of slack to notice and recover before the agent locks itself out.</p>
+<p>The cert ends up next to the key on the agent, and SSH picks it up automatically. When it expires, the agent&#39;s next reconnect fails until it fetches a new one, which should be a cron job pulling from the registry.</p>
+<p>The agent must be able to fetch new certs even when its tunnel is broken. This is a genuine chicken-and-egg problem: you would like to ship the new cert over the tunnel, but the tunnel may be down precisely because the old cert expired. So bootstrap that channel separately, over HTTPS to the registry with a separate credential.</p>
+<p>If your environment is locked down enough that the agent&#39;s <em>only</em> outbound is SSH to the relay (common in customer-appliance and air-gap-adjacent setups), you cannot bootstrap cert renewal over HTTPS at all. In that case, push fresh certs <em>through</em> the tunnel itself well before the existing cert expires, and overlap aggressively. The rule: lifetime minus the renewal interval is your safety margin. A cert that lives a week, renewed every two days, gives five days of slack, enough to survive several missed renewals while the tunnel is flapping.</p>
 <h2>Multiplexing many sessions over one tunnel</h2>
-<p>Opening a fresh TCP connection through the reverse tunnel for every command is fine for low volume. Once your CI starts running parallel jobs against the same agent, you want SSH&#39;s <code>ControlMaster</code>:</p>
+<p>Opening a fresh TCP connection through the reverse tunnel for every command is fine for low volume. Once your CI runs parallel jobs against the same agent, you want SSH&#39;s <code>ControlMaster</code>:</p>
 <pre><code>Host bench-*
     ControlMaster auto
     ControlPath ~/.ssh/cm-%r@%h:%p
     ControlPersist 10m</code></pre>
 <p>With this set on the client side, the first <code>ssh</code> to a given agent opens a master connection. Subsequent <code>ssh</code>, <code>scp</code>, and <code>rsync</code> calls to the same agent reuse it, skipping the TCP handshake, the SSH handshake, and the key exchange. The difference for a thousand quick commands is roughly the difference between an afternoon and lunch. <code>ControlPersist 10m</code> keeps the master alive for ten minutes of idle time after the last session disconnects, so back-to-back jobs amortize the setup cost.</p>
 <p>The shape on the wire:</p>
-<pre><code>without ControlMaster                with ControlMaster
----------------------                ------------------
-ssh ----TCP+SSH+kex---&gt; agent        ssh -----+
-ssh ----TCP+SSH+kex---&gt; agent        scp -----+----- one TCP, one kex
-scp ----TCP+SSH+kex---&gt; agent        rsync ---+----- N multiplexed
-rsync --TCP+SSH+kex---&gt; agent        ssh -----+      SSH channels
-                                              v
-                                          agent</code></pre>
-<p>On the relay, you can do the same trick: have your reverse tunnel itself use multiplexing so that all your CI traffic flows through one TCP connection from the agent. Combined with <code>ControlPersist</code>, this means a job that runs fifty commands ends up looking like one TCP session on the wire.</p>
-<p>You do pay for this with head-of-line blocking. If one command pegs the channel with <code>scp</code> of a large log, other commands queue behind it. For most lab use this does not matter. For high-throughput pipelines, run two tunnels: one for control-plane RPC, one for bulk data transfer.</p>
-<h2>Detecting dead tunnels (the part everyone gets wrong)</h2>
+<pre class="mermaid">flowchart TD
+    subgraph grpA[&quot;without ControlMaster&quot;]
+        s1[&quot;ssh: TCP+SSH+kex&quot;] --&gt; a1[&quot;agent&quot;]
+        s2[&quot;scp: TCP+SSH+kex&quot;] --&gt; a1
+        s3[&quot;rsync: TCP+SSH+kex&quot;] --&gt; a1
+    end
+    subgraph grpB[&quot;with ControlMaster&quot;]
+        m[&quot;ssh / scp / rsync&quot;] --&gt; chan[&quot;one TCP, one kex, N channels&quot;]
+        chan --&gt; a2[&quot;agent&quot;]
+    end</pre>
+<p>The reverse tunnel already gives the same property in the other direction for free: the single <code>-R</code> SSH connection from the agent carries every client session as a separate channel multiplexed over one TCP stream. Combined with <code>ControlPersist</code> on the client, a job that runs fifty commands ends up looking like one TCP session on the wire.</p>
+<p>You pay for this with head-of-line blocking. Every multiplexed channel shares the one underlying TCP byte stream, so a single big transfer monopolizes it and stalls everything queued behind it: if one command pegs the channel with <code>scp</code> of a large log, others wait their turn. This is TCP-level HOL blocking. For most lab use it does not matter. For high-throughput pipelines, run two tunnels: one for control-plane RPC, one for bulk data transfer.</p>
+<h2>Detecting dead tunnels</h2>
 <p>Here is the failure mode that has burned every team I have worked with. The tunnel looks healthy. The SSH process is running on the agent. <code>netstat</code> on the relay shows the connection established. You connect to port 12047 and the TCP handshake completes. Then nothing. The connection just hangs.</p>
-<p>The general &quot;connections lie to you about being healthy&quot; story (half-open TCP, NAT timeouts, why kernel keepalives are not enough by default) is its own post; the short version is that the SSH process and the kernel socket can both believe everything is fine while the actual path between agent and relay is gone. For tunnels specifically, you need three layers of defense, and you want all of them.</p>
-<pre><code>                  agent                      relay                client
-                +--------+                 +--------+           +--------+
-   Layer 1 ---&gt; | ssh    |&lt;--keepalive----&gt;| sshd   |           |        |
-                | proc.  |  30s x 3 = 90s  | proc.  |           |        |
-                +---+----+                 +---+----+           +--------+
-                    |                          |   port 12048
-   Layer 2 -----+   |   reverse SSH channel    |&lt;------- GET /healthz ----+
-        /healthz|   v                          v                          |
-                +---+----+ 127.0.0.1:8080  +---+----+                +----+----+
-                | health |&lt;----------------|forward |&lt;---------------|registry |
-                | resp.  |                 | :12048 |                |  probe  |
-                +---+----+                 +--------+                +----+----+
-                    ^                                                     |
-   Layer 3 --------(GET /tunnels/me, compare last_seen_at)-----HTTPS------+
-                    |
-                if stale: kill local ssh, let systemd restart</code></pre>
-<p><strong>Layer 1: SSH-level keepalives.</strong> <code>ServerAliveInterval=30</code> plus <code>ServerAliveCountMax=3</code> from the systemd unit above means the SSH client sends a keepalive every 30 seconds and, after three missed responses, tears down the connection. That detection window is roughly 90 seconds. Add the systemd restart (<code>RestartSec=10</code>), the new SSH handshake, and re-registration with the registry, and end-to-end recovery is more like 90 to 120 seconds. The important point is what this layer does <em>not</em> catch: anything where the agent&#39;s TCP socket looks alive but the path is broken further out.</p>
-<p><strong>Layer 2: A probe that traverses the tunnel itself.</strong> This is the part that is specific to reverse tunnels. It is not enough to ask &quot;is the agent healthy?&quot; (you cannot reach it directly to ask anyway); you need to ask &quot;does traffic still make it from the public side of the relay, through the forwarded port, down the SSH channel, and back?&quot; Run a small health responder on the agent and forward an additional port for it:</p>
+<p>The short version: nothing actively probes the end-to-end path unless you make it. A half-open TCP connection is one where one side silently went away, but the other side never sent anything to find out, so its socket still reads as ESTABLISHED. Both the SSH process and the kernel socket can believe everything is fine while the path between agent and relay is gone. For tunnels you want all three layers below.</p>
+<pre class="mermaid">flowchart TD
+    client[&quot;client / registry probe&quot;] --&gt;|&quot;GET /healthz to relay:12048&quot;| relayfwd[&quot;relay forward :12048&quot;]
+    client -.-&gt;|&quot;Layer 1: SSH keepalive 30s x 3&quot;| relayproc[&quot;relay sshd&quot;]
+    agentssh[&quot;agent ssh proc&quot;] &lt;--&gt;|&quot;Layer 1 keepalive 90s&quot;| relayproc
+    relayfwd --&gt;|&quot;Layer 2: reverse SSH channel&quot;| agenthealth[&quot;agent health resp 127.0.0.1:8080&quot;]
+    agentssh -.-&gt;|&quot;Layer 3: GET /tunnels/me compare last_seen&quot;| reg[&quot;registry&quot;]
+    agenthealth --&gt;|&quot;if stale kill ssh, systemd restarts&quot;| agentssh</pre>
+<p><strong>Layer 1: SSH-level keepalives.</strong> SSH does not enable these by default (<code>ServerAliveInterval</code> is 0 out of the box), so the 90-second window is a value you choose, not one you inherit. <code>ServerAliveInterval=30</code> plus <code>ServerAliveCountMax=3</code> from the systemd unit above means the client sends a keepalive every 30 seconds and, after three missed responses, tears the connection down. Add the systemd restart (<code>RestartSec=10</code>), the new SSH handshake, and re-registration, and end-to-end recovery is more like 100 to 120 seconds (the 90 seconds is detection alone). The important point is what this layer does <em>not</em> catch: SSH keepalives watch the transport connection, not the individual forwarded channels, so a channel can be dead while the connection still answers.</p>
+<p><strong>Layer 2: A probe that traverses the tunnel itself.</strong> This is the part specific to reverse tunnels. It is not enough to ask &quot;is the agent healthy?&quot; (you cannot reach it directly anyway); you need to ask &quot;does traffic still make it from the public side of the relay, through the forwarded port, down the SSH channel, and back?&quot; Run a small health responder on the agent and forward an additional port for it:</p>
 <pre><code class="hljs language-bash">ssh -N -R 12047:localhost:22 -R 12048:localhost:8080 \
     tunnel@relay.example.net</code></pre>
-<p>Then have the registry probe <code>relay.example.net:12048/healthz</code> once a minute. If the response stops, you know the tunnel pathway is broken even if the agent&#39;s local /healthz on <code>127.0.0.1:8080</code> would answer instantly. A direct /healthz on the agent would tell you nothing here, because you cannot reach it directly; that is the whole point.</p>
-<p><strong>Layer 3: Agent-side self-check.</strong> The agent itself can periodically reach out (HTTPS to the registry, or via the tunnel if HTTPS is not available) and ask: &quot;do you see my tunnel as up?&quot; If the answer is no but the agent thinks its tunnel is up, the agent kills its own SSH process and lets the supervisor restart it. This is the only check that catches the case where the relay-side socket is fine but the relay has been restarted and forgotten about the port reservation.</p>
-<p>The loop is small enough to inline:</p>
+<p>Then have the registry probe <code>relay.example.net:12048/healthz</code> once a minute. If the response stops, you know the tunnel pathway is broken even if the agent&#39;s local /healthz on <code>127.0.0.1:8080</code> would answer instantly. A direct /healthz on the agent would tell you nothing, because you cannot reach it directly; that is the whole point.</p>
+<p><strong>Layer 3: Agent-side self-check.</strong> This is the only check that catches the case where the relay-side socket is fine but the relay has been restarted and forgotten the port reservation. The reverse-forward mapping (port 12047 to this agent&#39;s channel) lives only in the relay sshd&#39;s process memory and dies with that process. After a relay restart, the agent&#39;s SSH socket can stay up or quickly reconnect, both ends&#39; sockets look fine, but the published port now goes nowhere. Only comparing the agent&#39;s belief against the registry&#39;s view exposes the mismatch. So the agent periodically asks the registry (over HTTPS, or via the tunnel if HTTPS is not available) &quot;do you see my tunnel as up?&quot; If the answer is no but the agent thinks its tunnel is up, it kills its own SSH process and lets the supervisor restart it.</p>
 <pre><code class="hljs language-bash">#!/usr/bin/env bash
 # /usr/local/bin/tunnel-selfcheck, run from a 60s systemd timer
 set -euo pipefail
@@ -177,9 +162,9 @@ if [[ $(date -d &quot;$last_seen&quot; +%s) -lt $(( $(date +%s) - 180 )) ]]; the
     logger -t tunnel-selfcheck &quot;registry says stale ($last_seen); killing ssh&quot;
     systemctl kill --signal=TERM tunnel.service
 fi</code></pre>
-<p>Together, these three layers reduce mean time to detection from &quot;your CI job times out in 30 minutes&quot; to &quot;the tunnel is back in about 90 to 120 seconds, and you mostly do not notice.&quot;</p>
+<p>Together, these three layers reduce mean time to detection from &quot;your CI job times out at whatever your timeout is, often around 30 minutes&quot; to &quot;the tunnel is back in about 100 to 120 seconds, and you mostly do not notice.&quot;</p>
 <h2>A small thing about hostnames</h2>
-<p>When you SSH through a <code>ProxyJump</code> to <code>localhost:12047</code>, your <code>known_hosts</code> ends up full of entries for <code>[localhost]:12047</code>, <code>[localhost]:12048</code>, etc. They all look the same to SSH, and when port assignments drift (the registry gives bench-17 a new port after it re-registers), you get noisy host-key warnings.</p>
+<p>When you SSH through a <code>ProxyJump</code> to <code>localhost:12047</code>, your <code>known_hosts</code> ends up full of entries for <code>[localhost]:12047</code>, <code>[localhost]:12048</code>, and so on. They all look the same to SSH, and when port assignments drift (the registry gives bench-17 a new port after it re-registers), you get noisy host-key warnings.</p>
 <p>The fix is <code>HostKeyAlias</code>:</p>
 <pre><code>Host bench-17
     HostName localhost
@@ -189,12 +174,12 @@ fi</code></pre>
     User root</code></pre>
 <p>Now <code>known_hosts</code> keys on <code>bench-17</code>, not on the port number, and port reassignments do not cause warnings.</p>
 <h2>What this is not</h2>
-<p>This is the right pattern for a few hundred to a few thousand agents. It is not the right pattern for tens of thousands. Past that scale you outgrow SSH and end up reaching for one of two families:</p>
+<p>This is the right pattern for a few hundred to a few thousand agents. It is not the right pattern for tens of thousands. Past that scale you outgrow SSH and reach for one of two families:</p>
 <ul>
 <li><strong>Managed reverse-tunnel services.</strong> Cloudflare Tunnel, frp, inlets, and Teleport all run an agent on the unreachable host and a controller you operate (or someone else operates) on the public side. You get the same dial-out shape this post describes, plus connection pooling, identity, and audit baked in.</li>
 <li><strong>Mesh VPNs.</strong> Tailscale / headscale, Nebula, and ZeroTier put every agent on an overlay network so it is reachable as a first-class participant. Different mental model: there is no &quot;tunnel&quot; you maintain, just a virtual network the agent joins on boot. Worth the switch if you want bidirectional connectivity and not just push-from-client.</li>
 </ul>
-<p>Both are bigger commitments than what is described here, and the operational shape is different enough that you should not pick one because reverse-SSH &quot;got hard&quot;. Pick one because the size or shape of the problem actually changed.</p>
+<p>Both are bigger commitments than what is described here, and the operational shape is different enough that you should not pick one because reverse-SSH got hard. Pick one because the size or shape of the problem actually changed.</p>
 <p>For boxes behind NAT, reverse SSH plus a port registry plus the three-layer health check covers the common case. The agent owns the connection and the channel lies; design for both.</p>
 </div>
 </article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
@@ -204,7 +189,7 @@ import { hydratePrebaked } from '/scripts/content.js';
 hydratePrebaked();
 if (document.querySelector('#content .mermaid')) {
   const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
-  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a', noteBkgColor:'#141414', noteTextColor:'#8a8f98', noteBorderColor:'#2a2a30', actorBkg:'#141414', actorBorder:'#2a2a30', actorTextColor:'#ededed', signalColor:'#8a8f98', signalTextColor:'#ededed' }});
   try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
 }
 </script>

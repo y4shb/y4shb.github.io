@@ -35,14 +35,14 @@
 <div class="progress" id="progress"></div>
 <header class="nav scrolled" id="nav"><a class="nav-brand" href="/">Yash Bhardwaj<span class="dot">.</span></a><nav class="nav-links" aria-label="Primary"><a href="/#projects">portfolio &#x2197;</a></nav></header>
 <main id="top"><article class="blog blog-wrap" id="article">
-<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">api</span><span class="chip">idempotency</span><span class="chip">control-plane</span></div></div><div class="meta-bottom"><span class="meta-read">11 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Dec 2, 2025</span></div></div><div id="content" data-prebaked="1"><h1>Idempotency keys for deploy and provisioning endpoints</h1>
-<p><em>stripe shipped this for cards in the mid-2010s. Your control plane is still rolling the dice</em></p>
-<p>Pick any reasonably mature payments SDK and you will find the same pattern: every mutating request takes an <code>Idempotency-Key</code> header, the server stores the response keyed by that header for some window, and a retry within the window returns the original response instead of charging the card again. Well-trodden ground: blog posts, RFCs, conference talks, and an in-flight IETF effort to register the header (<code>draft-ietf-httpapi-idempotency-key-header</code> in the IETF HTTPAPI working group, last revision expired, not yet an RFC; see datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/). This post is about the wire format: HTTP header, per-key fingerprint, response cache, Stripe lineage, and how to apply it to infra. (Its on-disk cousin, where you write a per-operation token to a journal before the side effect, is a different shape of the same idea and lives in its own post.)</p>
-<p>Now go look at the deploy endpoint on whatever internal control plane you talk to. Or the provisioning API for your test fleet. Or the firmware flash endpoint on the BMC. Odds are the contract is &quot;POST and pray, poll a status URL, and if the network burped, good luck.&quot;</p>
-<p>This is bizarre. The cost of double-charging a card is a chargeback and an angry email. The cost of double-flashing firmware mid-boot is a brick that needs a service tech. The cost of double-provisioning a worker is two workers fighting over a hostname, or a leaked lease that holds capacity hostage for a week.</p>
+<div class="blog-meta" id="meta"><div class="meta-top"><span class="meta-pill meta-pill--essay">essay</span><div class="meta-tags" aria-label="Tags"><span class="chip">api</span><span class="chip">idempotency</span><span class="chip">control-plane</span></div></div><div class="meta-bottom"><span class="meta-read">14 min read</span><span class="meta-dot" aria-hidden="true">&middot;</span><span class="meta-date">Dec 2, 2025</span></div></div><div id="content" data-prebaked="1"><h1>Idempotency keys for deploy and provisioning endpoints</h1>
+<p><em>stripe shipped this for cards in the mid-2010s, and your control plane is still rolling the dice</em></p>
+<p>Pick any reasonably mature payments SDK and you will find the same pattern: every mutating request takes an <code>Idempotency-Key</code> header, the server stores the response keyed by that header for some window, and a retry within the window returns the original response instead of charging the card again. Well-trodden ground: blog posts, RFCs, conference talks, and an in-flight IETF effort to register the header (<code>draft-ietf-httpapi-idempotency-key-header</code>). This post is about the wire format: HTTP header, per-key fingerprint, response cache, Stripe lineage, and how to apply it to infra. (Its on-disk cousin, writing a per-operation token to a journal before the side effect, is a different shape of the same idea and lives in its own post.)</p>
+<p>Now go look at the deploy endpoint on whatever internal control plane you talk to (the API surface that creates, configures, or tears down resources, versus the data plane that serves traffic once a resource exists). Or the provisioning API for your test fleet. Or the firmware flash endpoint on the BMC (baseboard management controller, the always-on chip that lets you power, monitor, and reflash a machine out of band). Odds are the contract is &quot;POST and pray, poll a status URL, and if the network burped, good luck.&quot;</p>
+<p>This is bizarre. Double-charging a card costs a chargeback and an angry email. Double-flashing firmware mid-boot bricks the box: the second flash overwrites a half-written image, the box no longer boots, someone walks to the rack. Double-provisioning a worker leaves two workers fighting over a hostname, or a leaked lease that holds capacity hostage for a week.</p>
 <p>Infra endpoints need idempotency more than payment endpoints, not less.</p>
 <h2>The shape of the problem</h2>
-<p>Take a small fictional service called <code>leasebroker</code> that hands out worker nodes from a pool. Clients call:</p>
+<p>Take a small fictional service <code>leasebroker</code> that hands out worker nodes from a pool. Clients call:</p>
 <pre><code>POST /v1/workers
 {
   &quot;image&quot;: &quot;worker-base:2025.11&quot;,
@@ -58,16 +58,21 @@ Location: /v1/workers/wkr-7Q2K9
   &quot;state&quot;: &quot;booting&quot;,
   ...
 }</code></pre>
-<p>Failure modes that produce a retry from the client&#39;s perspective:</p>
-<ol>
-<li>The request never makes it. TCP RST, DNS hiccup, LB 502. Client never sees a response.</li>
-<li>The request makes it, the server processes it, the response is lost on the way back. Client sees a timeout.</li>
-<li>The request makes it, processing is in flight, the client gives up before the response returns.</li>
-<li>The client process crashes after sending, and a supervisor restarts it without knowing whether the previous attempt landed.</li>
-</ol>
-<p>In cases 2, 3, and 4 the server already did the work; in case 1 it did not. From the client&#39;s vantage these are indistinguishable, so the client retries. Without idempotency, your fleet grows a phantom worker every time a flaky link causes a retry. You will not notice until the bill arrives or the pool runs dry.</p>
+<p>Four failure modes produce a retry from the client&#39;s perspective. In cases 2, 3, and 4 the server already did the work; in case 1 it did not, and from the client&#39;s vantage these are indistinguishable.</p>
+<pre class="mermaid">flowchart TD
+    A[Client sends POST] --&gt; B{Request reaches server}
+    B -- &quot;no: RST or DNS or 502&quot; --&gt; F1[&quot;Case 1: never processed&quot;]
+    B -- yes --&gt; C{Server processes it}
+    C -- &quot;response lost in transit&quot; --&gt; F2[&quot;Case 2: timeout, work done&quot;]
+    C -- &quot;client gives up mid-flight&quot; --&gt; F3[&quot;Case 3: in-flight, work done&quot;]
+    C -- &quot;client crashes then restarts&quot; --&gt; F4[&quot;Case 4: unknown, work maybe done&quot;]
+    F1 --&gt; R[Client retries]
+    F2 --&gt; R
+    F3 --&gt; R
+    F4 --&gt; R</pre>
+<p>Without idempotency, your fleet grows a phantom worker every time a flaky link causes a retry. You will not notice until the bill arrives or the pool runs dry.</p>
 <h2>A workable key scheme</h2>
-<p>The Stripe-style contract is the right starting point and you mostly do not need to invent anything new. Keep the wire format boring:</p>
+<p>The Stripe-style contract is the right starting point; you mostly do not need to invent anything new. Keep the wire format boring:</p>
 <pre><code>POST /v1/workers
 Idempotency-Key: 7c3f5d1e-91a4-4b8c-9f02-1c4a8e5b6d10
 Content-Type: application/json
@@ -75,16 +80,17 @@ Content-Type: application/json
 { ...body... }</code></pre>
 <p>Rules of the road:</p>
 <ul>
-<li>The key is whatever opaque string the client wants, up to some sane length. 128 chars sits comfortably inside the per-header limits of common reverse proxies (nginx&#39;s <code>large_client_header_buffers</code> defaults to 8 KB per single header field, Envoy defaults to 60 KiB for total request headers), so you stay clear of 431/414 territory even with other ambient headers. UUIDv4 is the obvious default. Do not let it be the empty string. The in-flight IETF draft (<code>draft-ietf-httpapi-idempotency-key-header</code>, HTTPAPI WG) is worth following.</li>
-<li>The key is scoped per principal and per endpoint. The same key from two different API tokens is two different keys. The same key sent to <code>POST /v1/workers</code> and <code>POST /v1/workers/{id}/reboot</code> is two different keys. Otherwise key collisions across tenants are a denial-of-service vector.</li>
+<li>The key is whatever opaque string the client wants, up to some sane length. 128 chars sits inside common reverse-proxy header limits (nginx allows 8 KB per single header field by default), so even with other ambient headers you stay clear of 431 (Request Header Fields Too Large) and 414 (URI Too Long). UUIDv4 is the obvious default; do not let it be the empty string.</li>
+<li>Scope the key per principal and per endpoint. &quot;Principal&quot; here means the authenticated identity the request runs as: the API token or account. The same key from two different tokens must be two different keys, and the same key sent to <code>POST /v1/workers</code> and <code>POST /v1/workers/{id}/reboot</code> should be treated as distinct. (Stripe scopes per account with the key covering the full request; the IETF draft leaves the uniqueness scope to the server, so per-endpoint scoping is a recommendation, not a wire requirement.) Scoping matters because in a shared, un-scoped keyspace two tenants can pick the same key, and one then receives the other&#39;s cached response or has its own request silently suppressed. That is a correctness and cross-tenant leakage problem first; degradation is secondary.</li>
 <li>The server stores the key, a request fingerprint, and the eventual response for a configurable window. 24h covers any realistic client retry budget (CI jobs retrying the next night, humans back from a meeting) and matches Stripe&#39;s v1 API retention. Anything shorter than your worst-case client retry budget is wrong.</li>
 <li>Subsequent requests with the same key return the stored response. Always. Even if the underlying resource has since been deleted.</li>
 </ul>
-<p>The fingerprint is the part most implementations get wrong, so let us dwell on it.</p>
+<p>The fingerprint is the part most implementations get wrong.</p>
 <h2>The &quot;request fingerprint&quot; gotcha</h2>
-<p>A naive implementation stores only the key and the response. A client sends key <code>K</code> with <code>{&quot;cpu&quot;: 16}</code>, gets back <code>wkr-7Q2K9</code>. Later the same client sends key <code>K</code> with <code>{&quot;cpu&quot;: 128}</code>. What should happen?</p>
-<p>Returning <code>wkr-7Q2K9</code> is dangerous: the client thinks it got a 128-CPU worker. Allocating a new worker is dangerous: the contract said &quot;this key is idempotent.&quot;</p>
-<p>The right answer is to detect the mismatch and return <code>409 Conflict</code> with a body that says &quot;this idempotency key was previously used with a different request payload.&quot; Compute a stable hash of the canonicalized request body (sorted JSON keys, normalized whitespace) when you first see the key, store it, and compare on every reuse.</p>
+<p>A naive implementation stores only the key and the response. A client sends key <code>K</code> with <code>{&quot;cpu&quot;: 16}</code>, gets back <code>wkr-7Q2K9</code>. Later it sends key <code>K</code> with <code>{&quot;cpu&quot;: 128}</code>. What should happen?</p>
+<p>Returning <code>wkr-7Q2K9</code> is dangerous: the client thinks it got a 128-CPU worker. Allocating a new worker is also dangerous: the contract said &quot;this key is idempotent.&quot;</p>
+<p>The right answer is to detect the mismatch and reject it with <code>409 Conflict</code>, with a body that says &quot;this idempotency key was previously used with a different request payload.&quot; (The IETF draft suggests <code>422 Unprocessable Entity</code> and Stripe returns <code>400 Bad Request</code>; any of the three is defensible, so pick one and document it. This post uses 409 throughout.) Store a fingerprint of the request when you first see the key, and compare it on every reuse.</p>
+<p>A stable hash of the canonicalized body (sorted JSON keys, normalized whitespace) is one valid fingerprint. Many implementations instead hash the raw request bytes plus method and path, because canonicalization can merge two requests you meant to keep distinct: if your API treats <code>{&quot;labels&quot;: {}}</code> and an absent <code>labels</code> field differently, a canonicalizer that drops empty objects hashes them the same, and the second caller silently gets the first caller&#39;s worker. Raw bytes do not. Whatever you choose, compute once and compare forever.</p>
 <p>A reasonable record looks like:</p>
 <pre><code>{
   &quot;key&quot;: &quot;7c3f5d1e-91a4-4b8c-9f02-1c4a8e5b6d10&quot;,
@@ -96,21 +102,24 @@ Content-Type: application/json
   &quot;response_body&quot;: &quot;{...}&quot;,
   &quot;response_headers&quot;: {...},
   &quot;created_at&quot;: &quot;...&quot;,
+  &quot;started_at&quot;: &quot;...&quot;,
   &quot;expires_at&quot;: &quot;...&quot;
 }</code></pre>
 <p>The <code>state</code> field matters for the next problem.</p>
 <h2>Concurrent retries to the same key</h2>
 <p>Client sends a request with key <code>K</code>, times out at 5 seconds, retries. The original is still being processed. Now two in-flight requests share the same key. If both threads check the store, see no record, and proceed, you have provisioned two workers from one logical request.</p>
-<p>The fix is a small state machine with the store doing the locking:</p>
+<p>The fix is a small state machine with the store doing the locking. A plain upsert does not tell you which path it took: &quot;this row is new because I inserted it&quot; versus &quot;this row already existed.&quot; Postgres gives you that signal through a system column called <code>xmax</code>, part of its MVCC (multi-version concurrency control) bookkeeping: on a freshly inserted row <code>xmax</code> is 0, and when a statement locks or modifies an existing row <code>xmax</code> is the current transaction&#39;s id (nonzero). So <code>(xmax = 0)</code> reads as &quot;I won the insert.&quot; It is a documented column, stable across versions, but Postgres-specific; other engines need their own rowcount or <code>RETURNING</code> trick.</p>
+<p>There is a catch with the conflict action. <code>ON CONFLICT DO NOTHING</code> only returns a row for rows it actually inserted, so a conflicting row gives you no <code>xmax</code> to inspect. To get the signal you want <code>ON CONFLICT DO UPDATE</code> with a no-op update, which returns a row in both cases:</p>
 <pre><code>INSERT INTO idempotency (key, principal, endpoint, request_hash, state)
 VALUES (?, ?, ?, ?, &#39;in_flight&#39;)
-ON CONFLICT (key, principal, endpoint) DO NOTHING
+ON CONFLICT (key, principal, endpoint) DO UPDATE SET key = EXCLUDED.key
 RETURNING (xmax = 0) AS inserted;</code></pre>
-<p>The <code>RETURNING (xmax = 0)</code> trick is how you tell &quot;I won the insert&quot; from &quot;someone else got here first&quot;: Postgres sets <code>xmax</code> to 0 on a freshly inserted row, nonzero when the conflict path was taken. Without it (or an equivalent rowcount check), naive callers will assume the INSERT succeeded and march on. If you own the request, process it. Otherwise look up the existing row. Three cases:</p>
+<p>The <code>DO UPDATE</code> writes the key back to its own value, so nothing changes semantically. But Postgres still takes a row lock and writes a new tuple version on the conflict path, which is why <code>xmax</code> flips to nonzero there. A freshly inserted row comes back <code>inserted = true</code> (<code>xmax = 0</code>); a conflicting row comes back <code>false</code>. The cost is a dead tuple and a little WAL per conflict, which autovacuum handles, so for a per-key table this is cheap.</p>
+<p>If you own the request, process it. Otherwise look up the existing row. Three cases:</p>
 <ol>
 <li><code>state = &#39;completed&#39;</code>, hash matches: return the stored response.</li>
-<li><code>state = &#39;completed&#39;</code>, hash differs: return 409.</li>
-<li><code>state = &#39;in_flight&#39;</code>: return <code>409 Conflict</code> with a <code>Retry-After</code> header, or block with a bounded wait, or return <code>425 Too Early</code>. Pick one and document it. The worst option is to silently proceed.</li>
+<li><code>state = &#39;completed&#39;</code>, hash differs: return <code>409 Conflict</code>.</li>
+<li><code>state = &#39;in_flight&#39;</code>: return <code>409 Conflict</code> with a <code>Retry-After</code> header, or block with a bounded wait. (You may see <code>425 Too Early</code> floated here; it is meant specifically for TLS 1.3 0-RTT early-data replay risk, not generic &quot;not ready,&quot; so 409 is the cleaner fit.) The worst option is to silently proceed.</li>
 </ol>
 <p>Visualized as a race between two concurrent clients sending the same key:</p>
 <pre><code>  client A                store                  client B
@@ -118,7 +127,7 @@ RETURNING (xmax = 0) AS inserted;</code></pre>
      |-- INSERT K, in_flight -&gt;|                    |
      |     OK (owns request)   |                    |
      |                      |&lt;-- INSERT K, in_flight |
-     |                      |    CONFLICT (no-op)   |
+     |                      |    conflict, no-op upd |
      |                      |&lt;-- SELECT K           |
      |                      |    row: in_flight     |
      |                      |--&gt; 409 Retry-After    |
@@ -128,15 +137,15 @@ RETURNING (xmax = 0) AS inserted;</code></pre>
      |                      |&lt;-- SELECT K (B retry) |
      |                      |    row: completed     |
      |                      |--&gt; stored response    |</code></pre>
-<p>A only wins the insert because of <code>ON CONFLICT DO NOTHING</code>; B&#39;s path through the three-case lookup is the entire reason that branch exists.</p>
-<p>I have seen &quot;block and wait&quot; implemented as <code>SELECT ... FOR UPDATE</code> against the row. Tempting, because the client gets the right answer without retrying. Also a great way to exhaust your DB connection pool the first time a slow upstream causes a retry storm. Default to a fast 409 and let the client back off.</p>
-<p>The <code>INSERT ... ON CONFLICT DO NOTHING</code> above is the create-time flavor of optimistic locking: the row itself is the lock. The same shape (compare-and-set on a version column) generalizes to any contested state transition, which I cover in the post on state machines for long-running operations.</p>
+<p>A wins because it inserted first; B takes the conflict path and gets a different signal, which is the entire reason that branch exists.</p>
+<p>I have seen &quot;block and wait&quot; implemented as <code>SELECT ... FOR UPDATE</code> against the row. Tempting, because the client gets the right answer without retrying. Also a great way to exhaust your connection pool the first time a slow upstream causes a retry storm. Default to a fast 409 and let the client back off.</p>
+<p>The insert-or-conflict above is the create-time flavor of optimistic locking: you take no explicit lock up front, you attempt the write and detect afterward whether someone beat you to it. The row&#39;s own existence is the lock, so the first writer wins. The same shape generalizes to any contested state transition as a compare-and-set on a version column (read version N, write only if it is still N), covered in the post on state machines for long-running operations.</p>
 <h2>What happens when the handler crashes mid-flight</h2>
-<p>A subtle failure mode hides in the state machine above. The handler inserts <code>state=&#39;in_flight&#39;</code>, starts work, dies (process killed, pod evicted, panic in step 2). The row stays. Every retry within the expiry window hits case 3 and gets <code>409 Conflict</code> forever. The client is locked out until the record expires, possibly 24 hours away.</p>
-<p>You need a short TTL on the <code>in_flight</code> state itself, separate from the 24h response cache. Five minutes is reasonable for fast operations, longer for genuine long-runners. The check becomes:</p>
+<p>A subtle failure mode hides in the state machine above. The handler inserts <code>state=&#39;in_flight&#39;</code>, starts work, dies (process killed, pod evicted, panic in step 2). The row stays. Every retry within the expiry window hits case 3 and gets <code>409 Conflict</code> forever, locking the client out until the record expires, possibly 24 hours away.</p>
+<p>You need a short TTL on the <code>in_flight</code> state itself, separate from the 24h response cache. This is where <code>started_at</code> earns its place: the timestamp of the current claim attempt (distinct from <code>created_at</code>, when the row first appeared), reset each time someone claims the key. Five minutes is reasonable for fast operations, longer for genuine long-runners. The check:</p>
 <pre><code>state = &#39;in_flight&#39; AND now() - started_at &lt; in_flight_ttl  -&gt; 409
 state = &#39;in_flight&#39; AND now() - started_at &gt;= in_flight_ttl -&gt; treat as free, attempt to claim</code></pre>
-<p>&quot;Attempt to claim&quot; is again an optimistic update: <code>UPDATE ... SET started_at = now() WHERE key = ? AND state = &#39;in_flight&#39; AND started_at = ?</code>. Whoever wins owns the next attempt. The loser falls through to the normal lookup.</p>
+<p>&quot;Attempt to claim&quot; is again an optimistic update: <code>UPDATE ... SET started_at = now() WHERE key = ? AND state = &#39;in_flight&#39; AND started_at = ?</code>. Whoever wins owns the next attempt; the loser falls through to the lookup.</p>
 <p>The full state machine for an idempotency record:</p>
 <pre><code>        +---------+
         |  none   |&lt;--------------+
@@ -157,10 +166,10 @@ state = &#39;in_flight&#39; AND now() - started_at &gt;= in_flight_ttl -&gt; tre
           | window expires
           v
         none</code></pre>
-<p>The <code>none -&gt; in_flight</code> edge is the atomic <code>INSERT ON CONFLICT</code>. The <code>in_flight -&gt; none</code> edge via TTL is the safety valve above; without it a crashed handler locks the key for the full response-cache window.</p>
-<p>A stronger version actively marks the row <code>failed</code> on terminal failure (uncaught exception, panic) so retries do not wait for the TTL. This works with a top-level <code>defer</code>/<code>finally</code> you trust; it does not when the process is hard-killed. Do both. The TTL is your safety net for cases the cleanup path cannot cover.</p>
+<p>The <code>none -&gt; in_flight</code> edge is the atomic <code>INSERT ON CONFLICT</code>. The <code>in_flight -&gt; none</code> edge via TTL is the safety valve above; without it a crashed handler locks the key for the full window.</p>
+<p>A stronger version marks the row <code>failed</code> on terminal failure (uncaught exception, panic) so retries do not wait for the TTL. This works with a top-level <code>defer</code>/<code>finally</code> you trust; it does not when the process is hard-killed. Do both: the TTL covers the cases the cleanup path cannot.</p>
 <h2>The TOCTOU trap in check-then-act handlers</h2>
-<p>Idempotency at the HTTP layer is necessary but not sufficient. The handler itself needs to be safe against partial execution.</p>
+<p>TOCTOU is time-of-check to time-of-use: you check a condition (no worker exists yet), then act on it (allocate one), but your handler can die partway through and the next attempt re-checks against a half-finished world. Idempotency at the HTTP layer is necessary but not sufficient. The handler itself needs to be safe against partial execution.</p>
 <p>Consider the naive provisioning handler:</p>
 <pre><code class="hljs language-python">def provision_worker(req):
     key = req.headers[&quot;Idempotency-Key&quot;]
@@ -176,14 +185,14 @@ state = &#39;in_flight&#39; AND now() - started_at &gt;= in_flight_ttl -&gt; tre
     response = make_response(node, lease)
     store.complete(key, response)
     return response</code></pre>
-<p>What happens when step 2 succeeds and step 3 fails because the hypervisor is briefly unreachable? The handler raises, the idempotency record stays <code>in_flight</code> (or worse, gets rolled back), the client retries, and now you have a leased node with no booted instance. The next retry allocates another node because <code>pool.allocate</code> is not idempotent.</p>
-<p>The fix is to make every side effect inside the handler keyed by the same idempotency key, so retries converge:</p>
+<p>What happens when step 2 succeeds and step 3 fails because the hypervisor is briefly unreachable? The handler raises, the idempotency record stays <code>in_flight</code> (or worse, gets rolled back), the client retries, and you have a leased node with no booted instance. The retry allocates another node because <code>pool.allocate</code> is not idempotent.</p>
+<p>The fix is to key every side effect inside the handler off the same idempotency key, so retries converge on the same identifiers. Derive a stable sub-key per side effect rather than store a list of them:</p>
 <pre><code>allocation_id = stable_hash(key + &quot;:alloc&quot;)
 lease_id      = stable_hash(key + &quot;:lease&quot;)
 boot_id       = stable_hash(key + &quot;:boot&quot;)</code></pre>
-<p>Then <code>pool.allocate</code> becomes &quot;allocate or return existing allocation for this allocation_id,&quot; <code>leases.insert</code> becomes &quot;insert or return existing lease,&quot; and <code>hypervisor.boot</code> becomes &quot;boot or report current state for this boot_id.&quot; Each downstream system needs its own idempotency story, but you derive the keys rather than invent them.</p>
-<p>On retry, your handler must check each sub-key&#39;s state before re-issuing. <code>pool.allocate</code> returns the existing allocation, <code>leases.insert</code> returns the existing lease, <code>hypervisor.boot</code> reports the current state. This is what makes the handler resumable, not just idempotent: a retry that arrives after step 2 succeeded but step 3 failed walks past steps 1 and 2 cheaply and only re-attempts the boot.</p>
-<p>A concrete trace of a retry that lands between step 2 and step 3:</p>
+<p>Deriving beats storing because it is deterministic: a retry, carrying the same <code>key</code>, recomputes the same <code>allocation_id</code> without reading any state first. (Plain namespacing like <code>key + &quot;:alloc&quot;</code> works just as well; hashing only buys you uniform length.)</p>
+<p>The sub-key is just a name; it does not make a downstream system idempotent by itself. You pass <code>allocation_id</code> into <code>pool.allocate</code>, and the pool must store it and return the existing allocation if it sees the same id again. So <code>pool.allocate</code> becomes &quot;allocate or return the existing allocation for this allocation_id,&quot; <code>leases.insert</code> becomes &quot;insert or return the existing lease,&quot; <code>hypervisor.boot</code> becomes &quot;boot or report current state for this boot_id.&quot; Each downstream still needs its own idempotency story, and that is the real work.</p>
+<p>The contrast: an idempotent handler can be safely called twice and gives the same answer; a resumable handler additionally skips steps it already finished. A retry that arrives after step 2 succeeded but step 3 failed walks past steps 1 and 2 and only re-attempts the boot:</p>
 <pre><code>attempt 1 (key K):
   pool.allocate(H1) -&gt; MISS -&gt; allocate, store H1 -&gt; node-42
   leases.insert(H2) -&gt; MISS -&gt; insert,   store H2 -&gt; lease-99
@@ -195,14 +204,16 @@ attempt 2 (same K):
   leases.insert(H2) -&gt; HIT  -&gt; returns lease-99 (no new lease)
   hypervisor.boot(H3) -&gt; MISS -&gt; RPC retried, succeeds
   store.complete(K, response)</code></pre>
-<p>Only <code>hypervisor.boot</code> actually re-runs. The earlier side effects are free because their sub-keys already resolved.</p>
-<p>If the hypervisor genuinely cannot accept a caller-supplied id (legacy thing, sorry), wrap it with a two-phase pattern. Do NOT hold a DB transaction open across the hypervisor call; it is the slowest thing in the path and a long-held lock will eat your connection pool. Insert a <code>pending</code> row keyed by <code>boot_id</code> before the call, commit, make the call, update the row with the <code>real_id</code>. On retry, you see the <code>pending</code> row, ask the hypervisor &quot;what happened to the boot for <code>boot_id</code>,&quot; and either record the real id or treat the boot as needing a fresh attempt.</p>
-<h2>What about the responses to nonidempotent verbs like DELETE and PATCH?</h2>
-<p>Same scheme, slightly different semantics. <code>DELETE /v1/workers/{id}</code> is idempotent at the resource level (first delete succeeds, subsequent deletes 404 or 204), but the <em>response</em> is not: the second caller sees a different status code than the first. If your client treats 404 as a failure that triggers a retry, you have a doom loop.</p>
-<p>Wrap it in the same key scheme. Store the first response, return it on every retry within the window. The client always sees 204, even on the seventeenth retry. The resource was deleted exactly once.</p>
+<p>Only <code>hypervisor.boot</code> re-runs. The earlier side effects are free because their sub-keys already resolved.</p>
+<p>If the hypervisor cannot accept a caller-supplied id, wrap it with a two-phase pattern, the same shape you recognize from a saga or outbox: commit your intent, make the slow external call, reconcile on the next retry. Do NOT hold a DB transaction open across the hypervisor call; it is the slowest thing in the path and a long-held lock will eat your connection pool. Insert a <code>pending</code> row keyed by <code>boot_id</code> before the call, commit, make the call, update the row with the <code>real_id</code>. On retry, you see the <code>pending</code> row and ask the hypervisor what happened to the boot.</p>
+<p>The hard case is a crash after the call was issued but before you recorded <code>real_id</code>: your <code>pending</code> row has no real id to query by. You close that gap by stamping <code>boot_id</code> into the call as client-visible metadata the hypervisor echoes back (a tag, name, or description field), then listing recent boots and matching on it. If the hypervisor exposes no such field, the honest fallback is to treat the boot as ambiguous and re-issue only if re-issuing is itself safe (the hypervisor rejects a duplicate boot for an already-running node). The intent survives the crash; reconciliation turns a half-finished external call into a known state.</p>
+<h2>What about nonidempotent verbs like DELETE and PATCH?</h2>
+<p>Same scheme, slightly different semantics. <code>DELETE /v1/workers/{id}</code> is idempotent at the resource level (first delete succeeds, subsequent deletes 404 or 204), but the <em>response</em> is not: the second caller sees a different status code than the first. The first DELETE returns 204, a retry hits an already-deleted resource and gets 404, and if your client treats 404 as a failure it retries again, gets 404 again, and loops forever. That is the doom loop.</p>
+<p>Wrap it in the same key scheme. Store the first response, return it on every retry within the window. The client always sees 204, even on the seventeenth retry, and the resource was deleted exactly once.</p>
 <pre><code class="hljs language-python">def delete_worker(req, worker_id):
     key = req.headers[&quot;Idempotency-Key&quot;]
-    record, inserted = store.claim(key, req)   # INSERT ... ON CONFLICT DO NOTHING RETURNING (xmax = 0)
+    # ON CONFLICT DO UPDATE ... RETURNING (xmax = 0) AS inserted, *
+    record, inserted = store.claim(key, req)
     if not inserted:
         if record.state == &quot;completed&quot;:
             return record.response             # always 204, even if row is gone
@@ -212,18 +223,17 @@ attempt 2 (same K):
     response = Response(status=204)
     store.complete(key, response)
     return response</code></pre>
-<p>The second call inside the window never reaches <code>workers.delete</code>. It returns the stored 204 even though the underlying row is now gone, which is exactly what the client&#39;s retry loop wants to see.</p>
-<p><code>POST /v1/workers/{id}/reboot</code> is the spicy one. Reboot is not naturally idempotent: two calls cause two reboots, and on real hardware that can mean a stuck firmware update or a thermal trip. Idempotency keys are the only mechanism by which clients can retry it safely.</p>
+<p><code>store.claim</code> uses the same <code>ON CONFLICT DO UPDATE ... RETURNING (xmax = 0)</code> as the create path, so the conflict branch returns the existing row and <code>record.state</code> is readable. The second call inside the window never reaches <code>workers.delete</code>; it returns the stored 204 even though the row is gone, which is what the retry loop wants.</p>
+<p><code>POST /v1/workers/{id}/reboot</code> is the dangerous one. Reboot is not naturally idempotent: two calls cause two reboots, and on real hardware that means a stuck firmware update or a thermal trip. Idempotency keys are the only way to retry it safely.</p>
 <h2>Expiry, garbage collection, and storage</h2>
 <p>A few practical notes:</p>
 <ul>
-<li>The key store will grow. Pick an expiry, write a sweeper, do not let it become the largest table in your DB.</li>
-<li>The expiry window must cover the longest retry budget any client uses. 24h fits most APIs. For long-running provisioning where the client is a CI job that retries the next night, consider 7 days.</li>
-<li>After expiry the key is reusable. Usually fine because clients generate fresh keys per request. If paranoid, prefix keys with the day.</li>
-<li>Compress large response bodies. Provisioning responses with full node metadata multiply by retention window and request rate.</li>
-<li>Do not store 5xx responses. The whole point of 5xx is &quot;try again.&quot; Caching a 503 forever is the wrong behavior. Store only terminal responses: 2xx, plus 4xx that you are confident represent a permanent client error.</li>
+<li>The key store will grow. Pick an expiry, write a sweeper, do not let it become the largest table in the DB.</li>
+<li>The expiry window must cover the longest retry budget any client uses. 24h fits most APIs. For long-running provisioning where the client is a CI job that retries the next night, 7 days.</li>
+<li>After expiry the key is reusable. Usually fine because clients generate fresh keys per request; if paranoid, prefix keys with the day.</li>
+<li>Compress large response bodies. Provisioning responses with full node metadata multiply by retention window times request rate.</li>
+<li>Do not store 5xx responses. The whole point of 5xx is &quot;try again.&quot; Store only terminal responses: 2xx, plus 4xx that you are confident represent a permanent client error. The rule: cache the response if and only if the server has made a durable state change <em>or</em> decided no state change will ever happen for this request.</li>
 </ul>
-<p>That last point trips people up. The rule I use: cache the response if and only if the server has made a durable state change <em>or</em> has decided that no state change will ever happen for this request. A 400 &quot;your image tag does not exist&quot; is cacheable. A 503 &quot;downstream is sad&quot; is not.</p>
 <p>A quick lookup table for the common cases:</p>
 <div class="table-wrap"><table>
 <thead>
@@ -282,19 +292,19 @@ attempt 2 (same K):
 <ul>
 <li>Generate the key once per logical operation, <em>before</em> the first attempt. Persist across retries. Persist across process restarts if the operation matters.</li>
 <li>Retry on network failures and 5xx with backoff. Do not generate a new key.</li>
-<li>On 409 with an idempotency mismatch, do not retry. The body changed, which is a bug. Surface it.</li>
+<li>On a 409 mismatch, do not retry. The body changed, which is a bug. Surface it.</li>
 <li>On 2xx you are done, no matter how many retries it took.</li>
 </ul>
-<p>Common antipattern: the client library generates a fresh UUID inside the retry loop. The author thought &quot;UUIDs are unique, this is fine.&quot; It defeats the mechanism entirely. Audit your SDKs.</p>
+<p>Common antipattern: the client library generates a fresh UUID inside the retry loop (&quot;UUIDs are unique, this is fine&quot;). It defeats the mechanism entirely. Audit your SDKs.</p>
 <h2>Why infra teams skip this and what it costs</h2>
-<p>The usual excuses for not implementing this on a control plane:</p>
+<p>The usual excuses for skipping this on a control plane:</p>
 <ol>
-<li>&quot;Our clients are well-behaved internal services.&quot; They are not, internal services run on flaky networks under load and retry as aggressively as you would expect.</li>
-<li>&quot;Our operations are fast enough that retries are not a problem.&quot; Provisioning takes seconds to minutes. The window for a retry that arrives after the original succeeded is enormous.</li>
-<li>&quot;We have eventual consistency, it sorts itself out.&quot; It does not, phantom resources sit there draining quota until someone files a ticket.</li>
-<li>&quot;We will add it later.&quot; The first attempt at the retrofit usually surfaces downstream systems that do not accept caller-supplied ids, and the cleanup becomes a multi-quarter project.</li>
+<li>&quot;Our clients are well-behaved internal services.&quot; They are not. Internal services run on flaky networks under load and retry as aggressively as anything external.</li>
+<li>&quot;Our operations are fast enough that retries are not a problem.&quot; Provisioning takes seconds to minutes, a wide window for a retry that lands after the original already succeeded.</li>
+<li>&quot;We have eventual consistency, it sorts itself out.&quot; Phantom resources sit there draining quota until someone files a ticket.</li>
+<li>&quot;We will add it later.&quot; The retrofit usually surfaces downstream systems that cannot accept caller-supplied ids, and cleanup becomes a multi-quarter project.</li>
 </ol>
-<p>Build it in on day one. The wire format is six lines of middleware, the store is one table with three indices, the hard part is making handlers safe (which you should be doing anyway). If you remember nothing else: hash the body so <code>409 Conflict</code> catches the same-key-different-payload bug, store the response so retries inside the window are free, and key every downstream side effect off the same value so your handler is resumable rather than merely idempotent. The first time a client SDK ships an aggressive retry policy, the fleet will not double.</p>
+<p>Build it in on day one. The wire format is six lines of middleware, the store is one table with three indices, and the hard part is making handlers safe, which you should be doing anyway. Fingerprint the body so a mismatch is caught instead of silently honored, store the response so retries inside the window are free, and key every downstream side effect off the same value so the handler is resumable, not merely idempotent. The first time a client SDK ships an aggressive retry policy, the fleet will not double.</p>
 </div>
 </article><footer class="blog-foot"><a href="/#projects">&#x2190; back to portfolio</a><a href="#top">top &#x2191;</a></footer></main>
 <script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
@@ -303,7 +313,7 @@ import { hydratePrebaked } from '/scripts/content.js';
 hydratePrebaked();
 if (document.querySelector('#content .mermaid')) {
   const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs');
-  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});
+  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:"'Geist Mono', ui-monospace, Menlo, monospace", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a', noteBkgColor:'#141414', noteTextColor:'#8a8f98', noteBorderColor:'#2a2a30', actorBkg:'#141414', actorBorder:'#2a2a30', actorTextColor:'#ededed', signalColor:'#8a8f98', signalTextColor:'#ededed' }});
   try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }
 }
 </script>

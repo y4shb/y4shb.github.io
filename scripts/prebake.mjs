@@ -261,7 +261,7 @@ function bodyHtml({ metaBlock, bodyHtml }) {
     "hydratePrebaked();\n" +
     "if (document.querySelector('#content .mermaid')) {\n" +
     "  const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@" + MERMAID_VERSION + "/dist/mermaid.esm.min.mjs');\n" +
-    "  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:\"'Geist Mono', ui-monospace, Menlo, monospace\", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a' }});\n" +
+    "  mermaid.initialize({ startOnLoad:false, theme:'dark', themeVariables:{ fontFamily:\"'Geist Mono', ui-monospace, Menlo, monospace\", darkMode:true, background:'#0d0d0f', primaryColor:'#1a1a1d', primaryTextColor:'#ededed', primaryBorderColor:'#2a2a30', lineColor:'#8a8f98', secondaryColor:'#141414', tertiaryColor:'#0a0a0a', noteBkgColor:'#141414', noteTextColor:'#8a8f98', noteBorderColor:'#2a2a30', actorBkg:'#141414', actorBorder:'#2a2a30', actorTextColor:'#ededed', signalColor:'#8a8f98', signalTextColor:'#ededed' }});\n" +
     "  try { await mermaid.run({ querySelector: '#content .mermaid' }); } catch(e) { console.warn('mermaid', e); }\n" +
     "}\n" +
     "</script>\n" +

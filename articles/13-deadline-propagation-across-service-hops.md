@@ -2,9 +2,11 @@
 
 *a 500ms budget is not 500ms at hop six unless every hop knows what it already spent*
 
-The checkout team paged me on a Tuesday with a complaint that sounded familiar. P99 was fine. P99.9 was a horror movie. Some requests took 12 seconds and returned data the user had long since stopped caring about. The frontend had given up at 800ms. The backend kept computing. Six services deep, a recommendation engine was still scoring carts for a user who had closed the tab and gone to lunch.
+Start with the distinction the whole piece rests on. A timeout is a local limit ("give up after 500ms"). A deadline is a shared budget ("give up at 12:00:00.500"). A user request is one pool of time, not a per-call setting: the moment it leaves the browser a clock starts, and every hop spends from the same pool, a little on the network, a little on its own work, then hands what is left to the next hop. A service that sets a fresh timeout instead bounds only its own slice, and slices add up. That is why timeouts compound down a chain instead of capping it.
 
-The fix was not bigger machines or faster code. The fix was telling every service how long it had left to live, and getting every service to believe it.
+The checkout team paged me on a Tuesday with a familiar complaint. P99 was fine. P99.9 was awful: some requests took 12 seconds and returned data the user had stopped caring about. The frontend had given up at 800ms. The backend kept computing. Six services deep, a recommendation engine was still scoring carts for a user who had closed the tab.
+
+The fix was not bigger machines or faster code. It was telling every service how long it had left, and getting every service to believe it.
 
 ## The shape of the problem
 
@@ -29,28 +31,31 @@ Here is a representative call graph for the failure mode.
                        reco-scorer
 ```
 
-Five hops from the edge to the deepest leaf. The user's browser sent a request with an 800ms client timeout. The edge gateway had its own 5 second default. The orchestrator had a 30 second default copied from a stack overflow answer in 2019. By the time you reached `reco-scorer`, nobody had any idea what the original budget was. Every service was happily working on requests that had already failed upstream.
+Five hops from the edge to the deepest leaf. The browser sent an 800ms client timeout. The edge gateway had its own 5 second default. The orchestrator had a 30 second default copied from an old answer online. By the time you reached `reco-scorer`, nobody knew the original budget. Every service was working on requests that had already failed upstream.
 
 This is the canonical deadline propagation problem. Each service knows its own timeout. None of them know the *remaining* budget.
 
 ## What a deadline actually is
 
-A timeout is a duration. A deadline is a wall-clock instant. The distinction matters.
+Here is the arithmetic that makes the timeout-versus-deadline gap bite. Suppose service A sets a 500ms timeout, spends 200ms doing work, then calls service B with a fresh 500ms timeout. Because B's timeout is fresh, the two do not share the budget, they add. From the user's wall clock, B can run until 200ms + 500ms = 700ms after A began, and the browser gave up at 800ms. B is computing with time the user no longer has.
 
-If service A sets a 500ms timeout and then spends 200ms doing work before calling service B with a 500ms timeout, service B now has up to 700ms of total budget from the user's perspective. The user's browser gave up at 800ms. Service B is computing into the void.
+A deadline removes the addition. "Finish before T+0.500s, where T is the moment the user pressed the button." When A calls B, A passes the deadline, not a timeout. B subtracts the current time from it, and that subtraction is its actual remaining budget. If the result is negative or absurdly small, B refuses to start. Because every hop subtracts from the same absolute instant, the budget shrinks monotonically instead of resetting.
 
-A deadline is absolute. "Finish before T+0.500s, where T is the moment the user pressed the button." When A calls B, A does not pass a timeout. A passes a deadline. B looks at the deadline, subtracts the current time, and that is its actual budget. If the result is negative or absurdly small, B should refuse to start the work.
+gRPC has had this since the early days. It encodes the deadline as the `grpc-timeout` header in a wire-friendly duration format: a number plus a case-significant single-letter unit. Lowercase `m` is milliseconds, uppercase `S` seconds, `H` hours, so `100m` is 100 milliseconds (not minutes) and `2S` is 2 seconds. When a gRPC server receives the call, its request context arrives with the deadline pre-installed. For Go and Java you do not have to think about it. You only have to not turn it off, and the usual way people accidentally do is calling the downstream with a fresh `context.Background()` instead of deriving from the request context, which silently severs the propagated deadline.
 
-gRPC has had this baked in since the early days. It encodes the deadline as the `grpc-timeout` header, in a wire-friendly format like `100m` (100 milliseconds) or `2S` (2 seconds). The deadline travels with the call. When the gRPC server receives it, the server-side context has the deadline pre-installed. You do not even have to think about it for Go and Java services. You just have to not turn it off.
+HTTP has no standard. There is no IETF-blessed deadline header, so you invent one. Most shops pick `X-Request-Deadline` carrying one of two encodings, and the choice is a real tradeoff:
 
-HTTP has no standard. There is no IETF blessed deadline header. You invent your own. Most shops settle on something like `X-Request-Deadline` carrying either an epoch milliseconds value or a remaining-millis integer. Either works. Epoch is simpler conceptually but requires NTP discipline across the fleet, because every hop's view of "now" is what gets subtracted from the deadline. Remaining-ms is more forgiving of clock skew because each hop only needs to measure elapsed time locally, at the cost of a small bias accumulated per hop and the need to remember the subtraction before forwarding.
+- **Epoch milliseconds** (an absolute timestamp). Simplest, but it requires NTP discipline fleet-wide. Every hop computes its budget as `deadline - its own now`, so if two machines disagree about the time, that clock skew is subtracted straight out of the budget. One machine's wrong clock corrupts everyone downstream.
+- **Remaining milliseconds** (a relative count). Each hop measures only its own elapsed time and never compares clocks, so it is immune to skew. The cost is a small per-hop bias: each forwarder records arrival time, does its work, subtracts its own elapsed time before forwarding, and any imprecision in that local subtract stacks up hop by hop.
+
+Pick epoch if you trust your clocks, remaining-ms if you do not.
 
 ## Threading the deadline through code
 
-The shape of the code, in Go, with a homegrown HTTP header for the non-gRPC parts:
+The shape of the code, in Go, with a homegrown HTTP header for the non-gRPC parts. Note for readers from Java or JS: Go's `context` is the request-scoped object carrying cancellation and deadline signals down a call tree. `context.WithTimeout` builds a deadline as a duration from now (the no-deadline fallback); `context.WithDeadline` builds one from an absolute instant (the propagated case).
 
 ```go
-const DeadlineHeader = "X-Request-Deadline-Ms"
+const DeadlineHeader = "X-Request-Deadline"
 
 // Server side: extract deadline from incoming request and install
 // it on the request context. Refuse fast if there is not enough
@@ -74,6 +79,8 @@ func DeadlineMiddleware(minBudget time.Duration) func(http.Handler) http.Handler
                 http.Error(w, "bad deadline header", 400)
                 return
             }
+            // Epoch-ms variant. For remaining-ms, instead do:
+            //   deadline := time.Now().Add(time.Duration(ms) * time.Millisecond)
             deadline := time.UnixMilli(ms)
             remaining := time.Until(deadline)
 
@@ -115,34 +122,34 @@ func ForwardDeadline(ctx context.Context, req *http.Request, slush time.Duration
 
 A few things worth pulling out.
 
-The `minBudget` argument to the middleware is the deadline-too-short check. If a service knows it has never returned a useful response in under 30ms, accepting work with 12ms left is pure waste. You spend CPU, you allocate memory, you hold a connection, and you fail with a deadline exceeded right at the end. Better to fail at the front door. The client gets a quick 503 and can decide whether to retry against a different replica, fall back to a cached answer, or surface the failure to the user. Anything is better than burning a worker for nothing.
+The `minBudget` argument is the deadline-too-short check. If a service has never returned a useful response in under 30ms, accepting work with 12ms left is pure waste: you spend CPU, allocate memory, hold a connection, and fail with a deadline exceeded right at the end. A fast 503 is strictly better because it frees the worker and connection instantly and hands the decision back to a caller who still has budget to spend, on a different replica, a cached answer, or a surfaced error. A late failure gives the caller none of those. Pick `minBudget` from observed latency, roughly your p50.
 
-A note on the status code. RFC 9110 Section 15.6.5 defines 504 (Gateway Timeout) narrowly as the case where a gateway or proxy did not receive a timely response from an *upstream* server. A leaf service that runs out of budget on its own is not strictly a gateway, so 504 is a bit of a stretch of the spec. 503 Service Unavailable with `Retry-After: 0` is the more defensible framing, and `Retry-After` is canonically paired with 503 and 429 rather than 504 (RFC 9110 Section 10.2.3, https://httpwg.org/specs/rfc9110.html#field.retry-after). Some shops reach for 504 anyway because the failure is morally a deadline-driven one and they want it bucketed with their other timeout metrics. Either is workable as long as you are consistent across the fleet.
+A note on the status code. **503 Service Unavailable** means "I cannot take this work right now"; pairing it with `Retry-After` tells the caller when to come back. **504 Gateway Timeout**, per RFC 9110 Section 15.6.5, means a server acting as a gateway or proxy did not get a timely response from an *upstream* server. A leaf running out of its own budget is not acting as a gateway, so 503 is the more defensible framing for "I declined before starting." RFC 9110 Section 10.2.3 pairs `Retry-After` with 503 and with 3xx redirects (https://httpwg.org/specs/rfc9110.html#field.retry-after). Some shops use 504 anyway to bucket it with other timeout metrics. Either works if you are consistent across the fleet.
 
-The `slush` parameter on the client side is the gap you reserve for yourself. If the downstream call returns at exactly the deadline, you still need a few millis to write the response, log it, and tear down the connection. There is no spec-blessed number here; in our experience a few millis, typically 5 to 10ms, is usually enough, but you should calibrate against your own teardown costs. Get this wrong in either direction and you will see strange behavior. Too little slush and your service returns a deadline-exceeded to its caller because the upstream deadline fired while you were unwinding. Too much slush and you waste budget the downstream could have spent.
+The `slush` parameter is the gap you reserve before forwarding the deadline downstream. Forward the full deadline and the downstream may run right up to it, leaving you zero time to serialize your reply, log, and tear down, so you return deadline-exceeded to *your* caller even though the downstream answered "in time." A few millis, typically 5 to 10ms, is usually enough; calibrate against your teardown costs. It is a per-hop reservation, so it compounds: at six hops you have quietly removed 30 to 60ms on top of real work. Acceptable against a 500ms pool, but it is one reason deep graphs feel tighter than the raw numbers suggest, and a reason to keep slush honest rather than padded.
 
 ## The gRPC and HTTP impedance mismatch
 
-The annoying part is that real graphs mix protocols. The edge gateway is HTTP. The orchestrator talks gRPC to most internal services. Inventory calls a vendor SOAP endpoint because of course it does. Each protocol has its own deadline convention. Translating between them is the part you have to write carefully.
+Real graphs mix protocols. The edge gateway is HTTP. The orchestrator talks gRPC to most internal services. Inventory calls a vendor SOAP endpoint. Each protocol has its own deadline convention, and translating between them is the part you write carefully.
 
 | Protocol | Carrier | Format | Default behavior |
 |---|---|---|---|
-| gRPC | `grpc-timeout` header | duration suffix (`500m`, `2S`, `1H`) | Server-side context has deadline pre-set |
+| gRPC | `grpc-timeout` header | duration suffix (`500m` = 500 ms, `2S` = 2 s, `1H` = 1 h) | Server-side context has deadline pre-set |
 | HTTP (homegrown) | custom header | epoch ms or remaining ms | Whatever middleware you wrote |
 | Kafka/queue | message header | epoch ms | Consumer must check before processing |
 | SOAP (vendor) | nothing | nothing | You set a client-side timeout and pray |
 
-When a gRPC server calls an HTTP downstream, you need a thin shim that reads the gRPC context deadline and writes it into your custom HTTP header. When an HTTP service calls a gRPC downstream, you do the reverse: read your custom header into a context with deadline, then let the gRPC client library forward it as `grpc-timeout` automatically.
+When a gRPC server calls an HTTP downstream, a thin shim reads the gRPC context deadline and writes it into your custom HTTP header. When an HTTP service calls a gRPC downstream, do the reverse: read your header into a context with deadline, then let the gRPC client forward it as `grpc-timeout` automatically.
 
-For the queue case, the message producer stamps the deadline into a header at enqueue time. The consumer checks the deadline before doing any work, and if the message has been sitting in the queue too long, drops it on the floor. This is how you avoid the classic "Black Friday flood pushes a job to the front of the queue three hours later and we charge someone's card for a sweater they no longer want" failure mode.
+For queues, the producer stamps the deadline into a header at enqueue time, and the consumer checks it before doing any work, dropping the message if it sat too long. The table lists epoch-ms here despite the clock-skew warning for one reason: a message may sit for hours, far longer than typical fleet skew, so an absolute instant is the only encoding that survives an unknown queue delay. Remaining-ms would have to be decremented by the broker, which queues do not do. Epoch is preferred for the async case, with NTP still assumed. This avoids the classic "flood pushes a job to the front three hours late and we charge a card for a sweater the user no longer wants" failure.
 
 ## The 200ms tail nobody could see
 
-Back to the checkout incident. Once we threaded deadlines end to end, the 200ms tail showed up immediately. `reco-scorer` had a defensive 30 second client timeout to its model serving sidecar. The sidecar was hitting a stale cached model that took 180ms to evaluate on a hot path that was supposed to take 5ms. Nobody had noticed because the 30 second timeout was so loose that even pathological evaluations always finished inside it. The user had given up, but the backend was still chewing.
+Back to checkout. Once we threaded deadlines end to end, the 200ms tail showed up immediately. `reco-scorer` had a defensive 30 second timeout to its model serving sidecar. The sidecar was hitting a stale cached model that took 180ms to evaluate on a path meant to take 5ms. Nobody noticed because the 30 second timeout was so loose that even pathological evaluations finished inside it. The user had given up; the backend kept chewing.
 
-Once deadlines were propagated, `reco-scorer` started getting requests with 80ms of budget left and refusing them with deadline-too-short. Recommendation quality dropped slightly. Latency dropped enormously. We then went and fixed the actual bug in the sidecar, because we could finally see it.
+Once deadlines propagated, `reco-scorer` got requests with 80ms left and refused them as deadline-too-short. Recommendation quality dropped slightly. Latency dropped enormously. Then we fixed the actual sidecar bug, because we could finally see it.
 
-This is the underrated benefit of deadline propagation. Loose timeouts hide problems. Tight, propagated deadlines surface them. The deadline-too-short rejection rate at deeper services becomes a real signal. You can plot "fraction of requests where this service received less than 50ms of budget" and you have a beautiful early warning for upstream regressions.
+This is the underrated benefit. Loose timeouts hide problems; tight propagated deadlines surface them. Deep services now fail fast whenever the remaining budget is too small, so the deadline-too-short rejection rate becomes a real signal. A rising rate of those early rejections is a leading indicator of an upstream latency regression. Plot "fraction of requests where this service received less than 50ms of budget" and you have an early warning.
 
 ```mermaid
 flowchart LR
@@ -158,33 +165,33 @@ flowchart LR
     I -->|no| K[do work]
 ```
 
-Each edge label is the budget the downstream sees on arrival; gaps between hops are network plus the caller's own processing time.
+Read the shrinking numbers as one budget spent down: each edge label is what the downstream sees *on arrival*, the same 500ms pool from the opening, ticking down monotonically because every hop subtracts from one absolute deadline. The fork is the subtle part: pricing and inventory both get 420ms because parallel siblings overlap in time and share the same absolute deadline, so they do not divide the budget. Only sequential hops spend it down. The decrements are illustrative.
 
 ## Things that bite you
 
-A few sharp edges worth mentioning.
+A few sharp edges.
 
-**Clock skew.** If you encode the deadline as an epoch timestamp and your fleet's clocks drift by 100ms, services with slow clocks will think they have more budget than they do, and services with fast clocks will reject perfectly valid work. NTP with a low stratum number (stratum 2 or better, where stratum-1 servers are directly attached to a stratum-0 reference clock such as a GPS or atomic source per RFC 5905, https://datatracker.ietf.org/doc/html/rfc5905) and active monitoring on drift is non-negotiable. If you cannot trust clocks, use remaining-millis encoding and accept the small bias from each hop's clock during the subtract step.
+**Clock skew.** If you encode the deadline as an epoch timestamp and clocks drift by 100ms, slow-clock services think they have more budget than they do and fast-clock services reject valid work. NTP discipline is non-negotiable for epoch encoding. A note on NTP topology (RFC 5905, https://datatracker.ietf.org/doc/html/rfc5905): the *stratum* number counts hops to an authoritative time source, but it is not an accuracy guarantee. The bounds RFC 5905 actually specifies are root delay and root dispersion (together, the synchronization distance), and a stratum-3 server on a fast link can beat a stratum-2 reached over a poor WAN. Pair good time sources with monitoring on the synchronization-distance bound. If you cannot trust clocks, use remaining-ms and accept the small per-hop bias.
 
-**Retries that ignore deadlines.** Any retry policy on the call path must check remaining budget before each attempt; the safe-retry mechanics themselves (idempotency keys, at-least-once handling) are out of scope here and covered separately in the idempotency-keys post.
+**Retries that ignore deadlines.** Any retry policy on the path must check remaining budget before each attempt; the safe-retry mechanics (idempotency keys, at-least-once handling) are covered in the idempotency-keys post (/article/idempotency-keys.html).
 
-**Streaming responses.** A long-poll or server-sent events endpoint does not have a single deadline. It has a connection lifetime. Trying to apply request-level deadline propagation to a streaming endpoint will cut the stream off at the deadline. You probably want the deadline to apply to time-to-first-byte, not total stream duration. This needs to be handled explicitly per endpoint.
+**Streaming responses.** A long-poll or server-sent-events endpoint has a connection lifetime, not a single deadline. Apply request-level propagation to it and you cut the stream off at the deadline. You want the deadline to govern time-to-first-byte instead: arm it on the context only until the first chunk flushes, then detach and switch to a connection-lifetime timeout. Handle this per endpoint.
 
-**Background work spawned from a request.** A request comes in, does its main work, returns to the user, and asynchronously kicks off a "send confirmation email" task. That async task should *not* inherit the request deadline. It needs a separate, longer deadline rooted at the moment the async work was scheduled. Forgetting this means your async work cancels itself the moment the user's response goes out.
+**Background work spawned from a request.** A request returns to the user, then asynchronously kicks off a "send confirmation email" task. That task must *not* inherit the request deadline; it needs a separate, longer deadline rooted at the moment the async work was scheduled. Forget this and your async work cancels itself the instant the user's response goes out.
 
-**Cancellation does not propagate up the call chain automatically.** When your context deadline fires, your in-flight downstream calls will return a deadline-exceeded error. Good. But if you were doing fan-out work, you need to actively cancel the sibling calls too. Most well-behaved client libraries do this when you cancel the context, but custom code often does not. Audit your fan-out code paths.
+**Cancellation does not fan out to siblings automatically.** When your context deadline fires, the cancel signal flows *down* into your in-flight downstream calls, and each returns deadline-exceeded. Good. The gap is sideways: if you launched several downstream calls in parallel off the same context, cancelling it should stop all of them, but custom code often notices only the first failure and leaves the siblings running. Well-behaved client libraries cancel siblings on a shared-context cancel; hand-rolled fan-out frequently does not. Audit those paths.
 
 ## The minimum viable rollout
 
-If you are starting from a fleet with no deadline propagation, the cheapest sequence I have seen work:
+Starting from a fleet with no deadline propagation, the cheapest sequence I have seen work:
 
 1. Pick a header name. Write it down. Get every team to agree before you write any code.
-2. Add the middleware to one service. Make it permissive: if no deadline arrives, use the existing timeout default. Log "no deadline received" as a counter.
-3. Add the client-side forwarding to that same service for one downstream call.
+2. Add the middleware to one service. Make it permissive: if no deadline arrives, use the existing default. Log "no deadline received" as a counter.
+3. Add client-side forwarding to that same service for one downstream call.
 4. Watch the "no deadline received" counter on the downstream. It should drop to zero from that one upstream.
-5. Walk the graph. Add middleware and forwarding service by service. Each addition causes the deadline-too-short counter to climb at the receiving service. That is the signal you are uncovering actual problems.
-6. Once the graph is covered, ratchet the upstream defaults down to realistic values. Now the deadlines that arrive at the leaves are the real user budget minus real elapsed work, not some random 30 second placeholder.
+5. Walk the graph, service by service. Each addition causes the deadline-too-short counter to climb at the receiving service. That is the signal you are uncovering real problems.
+6. Once the graph is covered, ratchet the upstream defaults down to realistic values. Now the deadlines that arrive at the leaves are the real user budget minus real elapsed work, not a random 30 second placeholder.
 
-You will get pushback from teams who say "but my service genuinely needs 30 seconds for some workloads." Sometimes that is true. The answer is not to skip deadline propagation, it is to admit that those workloads should not be on the synchronous user request path. Move them to a job queue with its own deadline semantics, return a job ID to the user, and let the frontend poll. Then the synchronous path can get tight deadlines and you stop pretending a 30 second p99 is acceptable for an interactive button click.
+You will get pushback from teams who say "my service genuinely needs 30 seconds for some workloads." Sometimes true. The answer is not to skip propagation, it is to admit those workloads should not be on the synchronous user request path. Move them to a job queue with its own deadline semantics, return a job ID, and let the frontend poll. Then the synchronous path gets tight deadlines and you stop pretending a 30 second p99 is acceptable for an interactive button click.
 
-The checkout team's p99.9 dropped from 12 seconds to under 900ms within two weeks of full propagation. The work was almost entirely plumbing. The hard part was getting six teams to agree on a header name.
+The checkout team's p99.9 dropped from 12 seconds to under 900ms within two weeks of full propagation. The work was almost entirely plumbing, and the hard part was getting six teams to agree on a header name.
