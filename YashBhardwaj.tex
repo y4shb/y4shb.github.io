@@ -1,0 +1,205 @@
+\documentclass[letterpaper,11pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\ifdefined\pdfgentounicode\input{glyphtounicode}\fi
+
+
+%----------FONT OPTIONS----------
+% sans-serif
+% \usepackage[sfdefault]{FiraSans}
+% \usepackage[sfdefault]{roboto}
+% \usepackage[sfdefault]{noto-sans}
+% \usepackage[default]{sourcesanspro}
+
+% serif
+% \usepackage{CormorantGaramond}
+% \usepackage{charter}
+
+
+\pagestyle{fancy}
+\fancyhf{} % clear all header and footer fields
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Adjust margins
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-0.5in}
+\addtolength{\textheight}{1.0in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+% Sections formatting
+\titleformat{\section}{
+  \vspace{-4pt}\scshape\raggedright\large
+}{}{0em}{}[\color{black}\titlerule \vspace{-5pt}]
+
+% Ensure that generate pdf is machine readable/ATS parsable
+\ifdefined\pdfgentounicode\pdfgentounicode=1\fi
+
+%-------------------------
+% Custom commands
+\newcommand{\resumeItem}[1]{
+  \item\small{
+    {#1 \vspace{-2pt}}
+  }
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & #2 \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubSubheading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \textit{\small#1} & \textit{\small #2} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & #2 \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubItem}[1]{\resumeItem{#1}\vspace{-4pt}}
+
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.15in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+%-------------------------------------------
+%%%%%%  RESUME STARTS HERE  %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\begin{document}
+
+\begin{center}
+    \textbf{\Huge \scshape Yash  Bhardwaj} \\ \vspace{1pt}
+    \small +91-8178084472 $|$ \href{mailto:yashbhardwaj911@gmail.com}{\underline{Email}} $|$
+    \href{https://www.linkedin.com/in/yash-bhardwaj-x/}{\underline{LinkedIn}} $|$
+    \href{https://github.com/y4shb}{\underline{Github}} $|$
+    \href{https://y4shbhardwaj.com/}{\underline{Website}}
+\end{center}
+
+
+%-----------Summary-----------
+% \section{Professional Summary}
+\small Senior Software Development Engineer with upto 5 years designing, building, \& shipping \textbf{high-availability, scalable platforms} and \textbf{automation pipelines}. Skilled in \textbf{distributed systems, microservices, cloud (AWS/Azure), CI/CD, \& observability}, with hands-on expertise in \textbf{Python, Java, JavaScript/TypeScript, Angular/React}. Passionate about clean architecture, developer productivity, and delivering secure, \textbf{customer-centric software solutions.}
+
+
+%-----------EXPERIENCE-----------
+\section{Experience}
+  \resumeSubHeadingListStart
+
+    \resumeSubheading
+      {AMD}{September 2025 -- Present}
+      {Senior Software Development Engineer, DCAuto Platform}{ }
+      \resumeItemListStart
+        \resumeItem{Developed features for \textbf{DCAuto}, AMD's internal platform automating \textbf{firmware CI/regression testing} for \textbf{AMD MI450 data center GPUs} by orchestrating deployments \& workloads across physical \textbf{Systems(SUTs)}.}
+        \resumeItem{Architected and shipped \textbf{PSN self check-in (HKYSY mode)} with idempotency and fallbacks to harden DCAuto deploy/submit workflows and recover from transient infra/SUT failures.}
+        \resumeItem{Built \textbf{DCAutoAI / Sherlog Holmes} (AMD AI Hackathon): 5-stage failure triage for GPU firmware validation (\textbf{50,000+ line} logs) using embeddings + \textbf{FAISS} vector search and \textbf{LLM} root-cause analysis; shipped Flask v3 APIs with \textbf{Celery/Azure Service Bus}, MongoDB, and Teams alerts.} \\
+      \resumeItemListEnd
+
+      \textbf{Tech Stack}: Python, Flask, Celery, WebSockets, PostgreSQL, MongoDB, Redis, Azure, CI/CD, Docker, FAISS
+
+    \resumeSubheading
+      {Qualcomm}{August 2022 -- June 2025}
+      {Software Engineer}{ }
+      \resumeItemListStart
+        \resumeItem{Designed and built \textbf{scalable, high-availability} systems for \textbf{Qualcomm Software Center (QSC)}, an Electron app built using \textbf{NodeJS, Angular, \& TypeScript}, ensuring seamless device-driver delivery for global OEMs.}
+        \resumeItem{\textbf{Delivered the first MacOS universal release for QSC}, single-handedly resolving cross-platform dependencies and ensuring a frictionless rollout to \textbf{Fortune 500 clients like Apple, Samsung, and Bosch.}}
+        \resumeItem{Owned the \textbf{end-to-end release management} process, automating \textbf{CI/CD pipeline} (Jenkins + AWS), packaging multiple modules, and enhancing \textbf{code quality} via rigorous \textbf{design/code reviews.}}
+        \resumeItem{Architected \textbf{AWS-based deployment pipelines} and integrated logging/monitoring, reducing software release times by \textbf{50\%} and improving incident response.}
+        \resumeItem{Collaborated daily with engineering managers and enterprise clients \textbf{(eg. Microsoft, AT\&T, BMW)} to triage bugs,
+        plan and build \textbf{key UI feature releases}, and ensure stability.} \\
+
+      \resumeItemListEnd
+
+      \textbf{Tech Stack}: NodeJS, Angular, Electron, Javascript, AWS, High-Availability Systems, CI/CD, Python
+
+    \resumeSubheading
+      {Licious}{June 2021 –- July 2022}
+      {Software Development Engineer }{ }
+      \resumeItemListStart
+        \resumeItem{Designed and \textbf{implemented scalable microservices} in Java (Spring Boot) and PHP, \textbf{optimizing high-volume order processing} for a nationwide POS system.}
+        \resumeItem{Architected RESTful APIs, reducing API response times by \textbf{25\%} across {100+ delivery centers.}}
+        \resumeItem{Built an \textbf{automated unit testing framework} using REST-assured, enhancing test coverage.}
+        \resumeItem{Automated \textbf{infrastructure deployment} with Docker and Kubernetes, streamlining development workflows.} \\
+
+    \resumeItemListEnd
+
+    \textbf{Tech Stack}: Java, SpringBoot, PHP, Microservices, High-Traffic Systems, Docker, Kubernetes, AWS \\
+
+  \resumeSubHeadingListEnd
+
+
+
+%-----------EDUCATION-----------
+\section{Education}
+  \resumeSubHeadingListStart
+    \resumeSubheading
+      {BITS Pilani KK Birla Goa Campus}{2017 -- 2021}
+      {Bachelor of Engineering(Hons.)}{ }
+  \resumeSubHeadingListEnd
+
+
+
+
+%-----------PROJECTS-----------
+\section{Projects}
+    \resumeSubHeadingListStart
+      \resumeProjectHeading
+          {\textbf{High-Scalability System Design, QSC } $|$ {\textbf{Qualcomm}}}{ }
+          \resumeItemListStart
+            \resumeItem{Engineered \textbf{high-performance API gateways}, assisted in \textbf{Axway-to-Apigee migration for QSC,} handling millions of requests per second.}
+          \resumeItemListEnd
+      \resumeProjectHeading
+          {\textbf{Prognostics Modeling of Part Degradation in Turbofan Engines} $|$ {\textbf{Thesis, BITS Pilani}}}{ }
+          \resumeItemListStart
+            \resumeItem{Designed LSTMs and ensemble based AI models using TensorFlow, achieving an R2 score of 0.75 for turbofan engine \textbf{life-cycle prediction.}}
+          \resumeItemListEnd
+      \resumeProjectHeading
+      {\textbf{DeepFake Generation and Detection Using GANs} $|$ {\textbf{BITS Pilani}}}{ }
+      \resumeItemListStart
+        \resumeItem{Modelled GANs for generating clear, recognizable images using PyTorch, achieving an 80\% accuracy.}
+      \resumeItemListEnd
+    \resumeSubHeadingListEnd
+
+
+
+%
+%-----------SKILLS-----------
+\section{Skills}
+ \begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{Python, Java, SpringBoot, JavaScript, TypeScript, React, Angular, NodeJS, Flask, SQL, PostgreSQL, Redis, AWS, Azure, Docker, Kubernetes, CI/CD, JIRA, Monitoring, Observability, Firmware Test Automation, AI Triage
+     }}
+ \end{itemize}
+
+
+%-------------------------------------------
+\end{document}
