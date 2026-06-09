@@ -1,35 +1,41 @@
 # The exactly-once myth and what idempotency actually buys you
 
-*brokers promise once; networks deliver many; your database decides what counts*
+*why message queues cannot deliver a message exactly once, and how your database makes that not matter*
 
-> Prerequisite: this post assumes you know how an idempotency key works at the HTTP boundary (UNIQUE constraint, stored response, rejecting the same key reused with a different request body). The companion post "Idempotency keys for deploy and provisioning endpoints" covers that ground. Here we are downstream of the API: queues, consumers, brokers, redelivery, and what "exactly-once" means once a message has crossed into asynchronous territory.
+> Prerequisite: this post assumes you know how an idempotency key works at the HTTP boundary. An idempotency key is a unique string the caller attaches to a request so the server can recognize a retry and avoid doing the work twice. (Idempotent means safe to run more than once without changing the outcome.) The companion post "Idempotency keys for deploy and provisioning endpoints" covers that ground. Here we are downstream of the API, in the asynchronous world: queues, the workers that read from them, the queue server itself, and what happens when the same message gets delivered more than once.
 
-Three terms first, because the essay turns on them. *At-least-once*: every message arrives one or more times, duplicates possible, loss never. *At-most-once*: zero or one times, no duplicates but loss possible. *Exactly-once*: precisely one time. The first two are achievable; the third, as a property of the wire, is not.
+First, some vocabulary. A *broker* is the queue or messaging server in the middle: producers hand it messages, it stores them, consumers read them out. A *producer* puts a message in (`enqueue` means add one); a *consumer* reads one out (`dequeue` means take one off). A *consumer group* is a set of consumer processes that split one queue's work, so each message goes to one member. When a consumer finishes a message it sends an *ack* (short for acknowledge): a "done with this one, don't send it again" signal. Until the broker gets the ack, it assumes the message might not have been processed and is free to send it again.
 
-Every few months somebody links a blog post titled "exactly-once delivery with $BROKER" and asks whether we should switch. The broker is not lying, exactly, but it is selling a property that ends at its own boundary. The moment your consumer pulls a message off the queue and tries to do something with it, you are back in at-least-once land, and the only way out is to make the side effect itself replay-safe.
+A *side effect* is any change a consumer makes to the outside world: a row written to a database, a card charged, an email sent. Side effects are what we care about not duplicating. Running the same code twice is harmless on its own; the problem is when it charges someone twice.
 
-Exactly-once-as-a-feature usually means "the broker will not deliver the same message twice to the same consumer group within a session, assuming no consumer crashes, no network partitions, no rebalances, and no operator restarts." A *rebalance* is the reshuffle the broker does when a member joins, leaves, or stops heartbeating, and those four conditions are precisely the ones that break in production, because crashes, deploys, and slow workers all trigger rebalances. The real end-to-end guarantee: the consumer sees each message *at least* once, possibly many times, and your job is to make the *effect* of seeing it more than once identical to seeing it exactly once.
+Three delivery guarantees the post turns on. *At-least-once*: every message arrives one or more times, duplicates possible, never lost. *At-most-once*: zero or one times, no duplicates but a message can be lost. *Exactly-once*: precisely one time. The first two are achievable; the third, as a property of the network itself, is not.
 
-What you actually want is *effectively-once*: a non-standard but useful name for the property that the user-visible effect happens once, however many times the message arrives. It is a property of the *consumer plus the destination database*, not of the transport. We learned this the hard way on a billing pipeline I will call `chargehook`.
+Every few months somebody links a blog post titled "exactly-once delivery with $BROKER" and asks whether we should switch. The property the broker advertises is real, but it stops at the broker's own edge. The moment your consumer pulls a message off the queue and acts on it, you are back to at-least-once, and the only way to make duplicates harmless is to make the side effect itself replay-safe.
+
+When a broker calls itself exactly-once, it usually means it will not deliver the same message twice to the same consumer group within one session, as long as no consumer crashes, no part of the network drops out, no rebalance happens, and no operator restarts anything. A *rebalance* is the reshuffle the broker does when a consumer joins the group, leaves it, or stops sending its keep-alive signal (each consumer is expected to keep *heartbeating*, sending a periodic "still alive" message; miss enough and the broker assumes it died). Those conditions are exactly the ones that happen in production, because crashes, deploys, and slow workers all trigger rebalances. So the real end-to-end guarantee is the weak one: the consumer sees each message at least once, possibly several times, and your job is to make the effect of seeing it more than once identical to seeing it once.
+
+That property has a name: *effectively-once*. Not a standard term, but useful: the user-visible effect happens once no matter how many times the message arrives. It is a property of your consumer plus the database it writes to, not of the broker or network. I hit this on a billing pipeline I will call `chargehook`.
 
 ## Where the broker's contract ends
 
-Picture the path a webhook takes from a payment processor to the ledger:
+Here is the path a webhook takes from a payment processor to the ledger. A *webhook* is an HTTP callback: instead of you polling for updates, the processor sends you an HTTP request when something happens. A *ledger* is the financial record of money movements, one row per charge.
 
 ```
 [processor] -> HTTPS -> [edge LB] -> [http handler] -> [queue] -> [worker] -> [postgres]
               (1)                   (2)              (3)         (4)         (5)
 ```
 
-The processor will retry (1) until it gets a 2xx. The load balancer might retry (2) on a timeout. Your HTTP handler enqueues (3) the message and acks the webhook. The queue delivers (4) to a worker. The worker writes (5) to Postgres.
+The `edge LB` is the edge load balancer (LB): the server at the front of your system that spreads incoming requests across your handler processes. The `worker` is the consumer process that reads the queue. Postgres (PostgreSQL) is an open-source relational database.
 
-Every arrow is a duplication opportunity. The processor retries because your handler timed out at 4.9 seconds even though the message was already enqueued. The LB retries to a sibling pod because the first one is in a garbage-collection stop-the-world pause that looks identical to a dead pod. The queue redelivers because the worker crashed between the side effect and the ack. Or Postgres commits, but the worker's TCP connection drops before the ack flushes, so the broker thinks the message was never acknowledged, redelivers, and the worker re-runs work it already finished.
+The processor will retry (1) until it gets a response in the 200 range. (HTTP groups its numeric status codes into families: 2xx means success, 4xx means the caller did something wrong, 5xx means the server failed; a plain 200 is the usual success.) The load balancer might retry (2) if the handler is slow. The handler enqueues (3) and acks the webhook. The queue delivers (4) to a worker. The worker writes (5) to Postgres.
 
-The broker's "exactly-once" only addresses arrow (4), under specific conditions. It does not address (1), (2), (3), or (5), so the system as a whole is at-least-once. No broker setting fixes this on its own, because the duplication is not in the broker. (The one exception is enrolling your application in the broker's own transaction, covered below.)
+Every arrow is a chance for a duplicate. The processor retries because your handler took 4.9 seconds to answer even though it had already queued the message. The load balancer retries to a sibling pod (a pod is one running copy of your service under Kubernetes; sibling pods are the other copies alongside it) because the first pod is paused. The pause is a garbage-collection stop-the-world pause: a moment when the runtime freezes the whole program to reclaim unused memory, and from outside a frozen pod and a dead pod look identical. The queue redelivers because the worker crashed between doing the side effect and sending the ack. Or Postgres commits the write, but the worker's TCP connection (the network connection it talks to the broker over) drops before the ack gets through, so the broker redelivers and the worker redoes finished work.
 
-## The bug that taught us this
+The broker's "exactly-once" only covers arrow (4), and only under those conditions. It does nothing for (1), (2), (3), or (5), so the system as a whole is at-least-once. No broker setting fixes this, because the duplication is not happening inside the broker. (The one exception is enrolling your own work in the broker's own transaction, covered below.)
 
-`chargehook` is a webhook handler that receives payment-success events and inserts a row into a `ledger` table for the charge. Early version, simplified:
+## The bug, and what it taught me
+
+`chargehook` is a webhook handler that receives payment-success events and inserts a row into a `ledger` table for each charge. The early version, simplified:
 
 ```python
 def handle(event):
@@ -41,9 +47,11 @@ def handle(event):
     return 200
 ```
 
-It passed code review. It passed unit tests. It ran fine for six months. Then we had a Postgres failover, and during the failover window the processor retried a batch of mid-flight events. Some customers got charged twice; a few got charged three times. Roughly forty hours of customer support followed before we understood what "idempotent" means where it matters.
+It passed code review and unit tests and ran fine for six months. Then we had a Postgres failover, and during the failover window the processor retried a batch of in-flight events. Some customers got charged twice; a few three times. About forty hours of customer support followed before we understood what idempotent means.
 
-A failover severs every open connection to the old primary, so an in-flight handler sees a dropped connection that to the upstream processor looks exactly like a timeout, and it retries. The retry re-enters `handle()` for an event whose first attempt had already committed the ledger insert but not yet the dedup mark, because `insert_ledger` and `mark_seen` ran in different transactions, each on its own pooled connection, and the connection died in the gap between those two commits. The sequence that fired:
+A database failover is when the primary database dies and a standby is promoted in its place. The *primary* takes all the writes; a *standby* is a copy kept in sync, ready to take over. A failover cuts every open connection to the old primary at once, so an in-flight handler sees its connection drop. To the upstream processor that looks like a timeout, so it retries.
+
+The retry re-enters `handle()` for an event whose first attempt had already committed the ledger insert but had not yet written the dedup mark. A *transaction* is a group of database writes the database treats as all-or-nothing: you *commit* to make them all permanent, or *roll back* to undo them all, with nothing in between ever visible. The trouble: `insert_ledger` and `mark_seen` ran in two separate transactions, each on its own *pooled connection* (a connection borrowed from a connection pool, a set of pre-opened database connections the app reuses to avoid opening a new one per request). The connection died in the gap between those two commits. The sequence that fired:
 
 ```
 T1: handle(evt-42) -> seen? no -> insert_ledger(evt-42) [committed]
@@ -52,9 +60,9 @@ T2: handle(evt-42) retry -> seen? no -> insert_ledger(evt-42) [committed again]
 T2: mark_seen(evt-42) [committed]
 ```
 
-Two ledger rows. One dedup row. From the dedup table's perspective the event was processed once; from the customer's bank statement, twice. The dedup table was lying because it was not party to the same transaction as the thing it claimed to be deduplicating.
+Two ledger rows. One dedup row. The dedup table thought the event was processed once; the customer's bank statement showed twice. The dedup table gave the wrong answer because it was not written inside the same transaction as the thing it was supposed to guard.
 
-The fix follows from the principle. When the side effect *is itself a write to the database*, the dedup row has to be written in the *same transaction* as that side effect, against the *same database*, with a uniqueness constraint that rejects the second attempt outright. (Side effects that are not database writes, like charging a card or sending an email, cannot be enrolled in a database transaction at all; they need the mechanisms covered next.)
+When the side effect is itself a write to the database, the dedup row has to be written in the same transaction as that side effect, against the same database, with a uniqueness constraint that rejects the second attempt outright. (Side effects that are not database writes, like charging a card or sending an email, cannot be put inside a database transaction at all; they need the mechanisms covered next.)
 
 ```python
 def handle(event):
@@ -75,37 +83,47 @@ def handle(event):
     return 200
 ```
 
-A try/except on `UniqueViolation` is semantically equivalent but slower on the hot path: in Postgres any error aborts the *entire* transaction, so to catch a duplicate and keep work already done you must wrap the insert in a `SAVEPOINT` (a named subtransaction) on *every* attempt, and once a backend exceeds the 64-entry subtransaction cache, lookups spill to `pg_subtrans` and hit a sharp performance cliff. `ON CONFLICT DO NOTHING` sidesteps it: the server detects the conflict internally, never raises error 23505, and just sets `rowcount` to 0. Either way, the two writes commit or roll back together. Crash between the insert and the commit, and neither happens; the retry succeeds. Crash after the commit but before acking, and the retry hits the conflict and returns 200 without double-charging. The dedup table is no longer a hint, it is the authority, because the `UNIQUE` index *is* the serialization point: two competing inserts reach for the same index key, Postgres lets exactly one win, and that index lock gates the ledger row too, since both live in one transaction.
+A `UNIQUE` constraint (sometimes built as a `UNIQUE` index) tells the database no two rows may share the same value in a column. Here that column is `event_id`, so the database refuses to store the same event twice. `ON CONFLICT (event_id) DO NOTHING` is a Postgres clause: if this insert would collide with an existing row on that unique value, skip it quietly instead of failing, and `rowcount` comes back as 0, which is how the code knows the event was already handled.
+
+Catching the duplicate as an error instead is slower on the hot path (the common, high-frequency code path most requests take). In Postgres any error aborts the entire transaction, so to catch a duplicate and keep the work already done you would wrap each insert in a `SAVEPOINT` (which starts a subtransaction: a nested, separately-undoable section inside a transaction) on every attempt, and past 64 subtransactions per backend that gets expensive. `ON CONFLICT DO NOTHING` avoids that: the server notices the conflict internally, never raises the duplicate-key error (Postgres calls it error 23505), and just sets `rowcount` to 0.
+
+Either way, the two writes commit or roll back together, as one all-or-nothing unit (this is what *atomic* means: all of it happens or none of it does). Crash before the commit and neither write lands; the retry succeeds. Crash after the commit but before the ack and the retry hits the conflict and returns 200 without double-charging. The dedup table is now the authority, not a hint, because the `UNIQUE` index is the *serialization point*: the single place concurrent attempts are forced into an order. Two competing inserts reach for the same index key, the database takes a short *index lock* on it and lets exactly one win, and because both writes live in one transaction, that lock gates the ledger row too.
 
 ## The rule, stated plainly
 
-The dedup key has to live next to the side effect, in the same atomic unit. "Same atomic unit" is doing all the work in that sentence. A Postgres insert: the dedup row goes in Postgres, in the same transaction. An external API call: you cannot enroll the dedup row in the call's transaction, so the dedup record has to be something *that endpoint* respects (Stripe's `Idempotency-Key`, retained 24 hours per [docs.stripe.com/api/idempotent_requests](https://docs.stripe.com/api/idempotent_requests): Stripe, not you, remembers the key). Sending an email: you cannot achieve exactly-once no matter what, because SMTP is at-least-once and Gmail exposes no dedup primitive. The best you get is "marked sent in our DB so we won't re-enqueue."
+The dedup key has to live next to the side effect, inside the same all-or-nothing unit. What "same unit" means depends on the side effect.
 
-The "what enforces it" column names the mechanism that makes the dedup decision atomic; for the Postgres row it is MVCC (multi-version concurrency control), where write conflicts resolve on the shared index so two concurrent inserts of the same key cannot both succeed.
+A Postgres insert: the dedup row goes in Postgres, in the same transaction, as above.
+
+An external API call: you cannot put the dedup row inside the call's transaction, because it is not your database, so the dedup record has to be something that endpoint itself respects. Stripe's `Idempotency-Key` is exactly this: you send a unique key with the charge request, and Stripe remembers it for 24 hours and refuses to run the same charge twice ([docs.stripe.com/api/idempotent_requests](https://docs.stripe.com/api/idempotent_requests)). Stripe, not you, holds the key.
+
+Sending an email: you cannot get exactly-once at all, because SMTP (Simple Mail Transfer Protocol, which moves email between servers) is itself at-least-once and Gmail gives you no way to flag a duplicate. The best you can do is record "sent" in your own database so you do not re-enqueue it.
+
+The table below lists, per side effect, where the dedup key lives and what enforces it. For the Postgres row that mechanism is the shared `UNIQUE` index: two concurrent inserts of the same key reach for the same index key and only one can win.
 
 | Side effect | Where the dedup key lives | What enforces it |
 |---|---|---|
-| Postgres row insert | Same Postgres txn, `UNIQUE` index | Postgres MVCC |
+| Postgres row insert | Same Postgres txn, `UNIQUE` index | The `UNIQUE` index |
 | Stripe charge | `Idempotency-Key` header (Stripe holds it 24h) | Stripe server |
 | S3 object write | Conditional PUT with `If-None-Match: *` | S3 server (rejects second PUT) |
-| Kafka produce | `enable.idempotence=true` + producer epoch | Broker, per-partition |
+| Kafka produce | `enable.idempotence=true` | Broker, per-partition |
 | Outbound email | "Sent" flag in your DB, before SMTP call | You, optimistically |
 | Push notification | Same as email, plus client-side dedup by msg-id | You + client SDK |
 
-On the Kafka row: `enable.idempotence=true` turns on the *producer epoch*, a monotonic number Kafka assigns each producer session. When a producer reconnects it gets a higher epoch and the broker fences off writes from the stale one, deduplicating retries *per-partition*, not across the whole topic.
+On the Kafka row: `enable.idempotence=true` makes the broker reject duplicate writes from a producer's retries. This works per *partition*: a Kafka topic is split into partitions, each an ordered log of messages, and the dedup is within one partition, not across the whole topic.
 
-On S3: a plain PUT is last-writer-wins, so two concurrent puts of the same key with different bodies both succeed and the second silently wins. To stop the second writer from clobbering the first, use the conditional write S3 added in 2024, `If-None-Match: *`, which fails the second PUT with `412 Precondition Failed`. This buys atomic create-if-not-exists, not content-based dedup: two *different* keys holding identical bytes still produce two objects.
+On S3 (Amazon's object storage service): a plain PUT (an HTTP upload of an object) is *last-writer-wins*, so if two uploads of the same key race, both succeed and whichever finishes last silently overwrites the other. To stop that, use the conditional write S3 added in 2024: `If-None-Match: *`, a header that tells S3 to perform the PUT only if no object with that key exists yet. The second PUT then fails with `412 Precondition Failed` (412 is the HTTP status for "a condition you required was not met"). This gives an atomic create-if-not-exists, not content-based dedup: two different keys holding identical bytes still produce two objects.
 
-The email and push rows are the embarrassing ones: no end-to-end guarantee, only "we tried not to send twice." If a customer-facing flow sends email, write it down as at-least-once and design the template so a duplicate is harmless ("Your receipt for order #1234" repeats fine; "You have been charged $500" does not).
+The email and push rows have no end-to-end guarantee, only "we tried not to send twice." If a flow sends email, treat it as at-least-once and design the template so a duplicate does no harm. "Your receipt for order #1234" repeats fine; "You have been charged $500" does not.
 
 ## Why brokers cannot give you the guarantee
 
-No broker can offer end-to-end exactly-once because of the two generals problem: two parties talking only over a channel that can drop messages can never become *certain* they agree, since the last acknowledgment might be the one that was lost. The consumer has to (a) perform a side effect and (b) tell the broker the message was processed: two operations against two systems. Whichever order you choose, a crash leaves a window:
+No broker can give you end-to-end exactly-once, because of the two generals problem: two parties who can only coordinate over a channel that may drop messages can never become certain they agree, since the last confirming message might be the one that was lost, and neither side can tell. The consumer and broker are in that bind. The consumer has to (a) perform the side effect and (b) tell the broker the message was processed: two operations against two systems, and whichever order you pick, a crash leaves a gap:
 
-- Ack first, then side effect: crash in the middle, the side effect never happens. Message lost.
-- Side effect first, then ack: crash in the middle, side effect happens, broker redelivers, side effect happens again. Duplicate.
+- Ack first, then side effect: crash in the middle and the side effect never happens. Message lost.
+- Side effect first, then ack: crash in the middle and the broker redelivers, so the side effect happens again. Duplicate.
 
-You could collapse the two into one with a *distributed transaction* (XA, two-phase commit), but it is operationally painful (single point of failure, locks held across the network, *in-doubt* transactions stuck if the coordinator dies after "prepare"), so almost nobody runs XA across a broker and a database in production. The textbook answer is the one we have been building toward: side effect first, then ack, and make the side effect idempotent. That gives you at-least-once delivery and effectively-once semantics, which is what you wanted.
+You could try to collapse the two into one with a *distributed transaction*, a transaction spanning two separate systems. The standard machinery is two-phase commit (also called XA): a *coordinator* first asks every system to *prepare* (promise it can commit if asked), then once all have promised, tells them to commit. The problem is when the coordinator dies after the prepare phase: every system is left with an *in-doubt* transaction, holding locks and unable to decide whether to commit or roll back until the coordinator returns. That, plus the coordinator being a single point of failure, is why almost nobody runs XA across a broker and a database in production. The practical answer is the one we have been building toward: side effect first, then ack, and make the side effect idempotent. That gives you at-least-once delivery with effectively-once results.
 
 ```mermaid
 flowchart LR
@@ -119,25 +137,29 @@ flowchart LR
     H -->|dedup row from F makes 2nd pass a no-op| B
 ```
 
-The back-edge terminates because the dedup row committed at `F` already exists on redelivery, so the second pass takes the `D` branch. Redelivery is *fine*: the system tolerates any number of crashes between commit and ack without user-visible duplication.
+The loop terminates because the dedup row committed at `F` already exists when the message is redelivered, so the second pass takes the `D` branch and acks without redoing the work. Redelivery is fine here: the system tolerates any number of crashes between commit and ack without the customer ever seeing a duplicate.
 
-## Replay storms (sidebar)
+## Replay storms
 
-Idempotent consumers give you replay for free: re-feed a message range and the dedup table absorbs the ones that already landed. The catch is that a million-event replay with a 99% dupe rate still costs a million round trips and a lot of WAL (write-ahead log). Rate-limit the replay tool so it does not starve live traffic, partition the dedup table by month so old slices can be detached, and if your stream is genuinely hot, front Postgres with a Bloom filter or Redis `SET` as a *negative cache*. A Bloom filter fits because its errors only go one way: a "definitely-not-seen" answer is trustworthy, a "maybe-seen" answer just falls through to Postgres, where `ON CONFLICT` remains the real guard. The cache is an optimization, never the authority; the moment correctness depends on Redis you have rebuilt the original bug.
+Idempotent consumers give you replay almost for free: re-feed a range of messages and the dedup table absorbs the ones that already landed. The cost is that a million-event replay where 99% are duplicates still costs a million round trips (a round trip is one request across the network plus the response back) and a WAL write each time. WAL is the write-ahead log: before Postgres changes a data file it records the change in a sequential log, so a crash can be recovered by replaying it. Even an insert that does nothing writes to it.
+
+So rate-limit the replay tool so it does not starve live traffic, and for a high-volume stream put a *negative cache* in front of Postgres: a small fast store that remembers "this one is definitely new" so most lookups skip the database. A Bloom filter works: a compact structure whose errors only go one way, so it may say "maybe seen" for something new but never "not seen" for something it has. A "maybe seen" answer falls through to Postgres, where `ON CONFLICT` is still the real guard. The cache is only an optimization, never the authority. The moment correctness depends on it, you have rebuilt the original bug.
 
 ## What about Kafka's "exactly-once semantics"?
 
-Kafka EOS is real, but narrower than the marketing suggests. An *offset* is a consumer's bookmark, the position of the last record it processed in a partition; committing one tells Kafka "do not redeliver before this point." EOS gives you exactly-once for one pattern: consume from Kafka, transform, produce back to Kafka, with the input offsets committed *inside the same transaction* via `sendOffsetsToTransaction`. That closes the gap, because offsets are themselves stored in a Kafka topic (`__consumer_offsets`): the offset commit and the output write are both effects on the same cluster, through the same transaction coordinator, so Kafka commits them atomically and a crash leaves no window where the offset moved but the output is missing. `isolation.level=read_committed` on *downstream* consumers of the output topic tells them to skip records from aborted transactions; it is not optional for EOS.
+Kafka's exactly-once semantics (EOS) is real, but covers a narrower case than the name suggests. An *offset* is a consumer's bookmark: the position of the last record it processed in a partition. Committing an offset tells Kafka "do not redeliver anything before this point."
 
-The reason the whole loop must stay inside Kafka is now plain: the atomic unit is "Kafka offsets plus Kafka output records," and only effects Kafka owns can join. The moment your consumer writes to Postgres, hits an external API, or sends an email, that write is outside the Kafka transaction, so a crash can leave it committed while the offset rolls back, and you are back to at-least-once for that hop. The fix is to make the external sink idempotent.
+EOS gives you exactly-once for one shape of work: consume from Kafka, transform, and produce back to Kafka, with the input offsets committed inside the same transaction via the `sendOffsetsToTransaction` call (it records the consumed offsets as part of the producing transaction). This closes the gap because offsets are themselves stored in a Kafka topic (`__consumer_offsets`): the offset commit and the output write are both changes to the same cluster, run through the same *transaction coordinator* (the Kafka component that drives the commit), so Kafka commits them together and a crash never leaves the offset moved but the output missing. Downstream consumers of the output topic must set `isolation.level=read_committed`, which tells them to skip records from transactions that were aborted (started but rolled back). That setting is required for EOS.
 
-One way to bridge it is the *transactional-outbox* pattern: instead of writing to the database and publishing to the broker as two steps, you write the outbound message into an `outbox` table in the *same* transaction as your business write. A separate relay reads the outbox and publishes at-least-once. The business write and the intent-to-publish can never diverge because they share one commit, and downstream consumers dedup on the message id.
+This is why the whole loop has to stay inside Kafka: the all-or-nothing unit is "Kafka offsets plus Kafka output records," and only changes Kafka owns can join it. The moment your consumer writes to Postgres, calls an external API, or sends an email, that write is outside the Kafka transaction, so a crash can leave it committed while the offset rolls back, and you are back to at-least-once for that hop. The fix is to make the external destination idempotent, as before.
 
-So EOS is useful for stream-processing topologies (Kafka Streams, Flink with Kafka source and sink) and mostly useless for "consume from Kafka and update my application database without duplicates." For that you still need an idempotent consumer with a dedup table in Postgres, exactly as above.
+One way to bridge Kafka to your own database is the *transactional-outbox* pattern. Instead of writing to the database and publishing to the broker as two steps (the same two-systems gap), you write the outbound message into an `outbox` table in the same transaction as your business write. A separate process, the *relay*, reads new outbox rows and publishes them at-least-once. The business write and the intent-to-publish can never disagree, because they share one commit, and downstream consumers dedup on the message id.
+
+So EOS is useful for stream-processing setups: tools like Kafka Streams or Flink (stream-processing frameworks) reading from a Kafka source and writing to a Kafka *sink* (the destination a stream writes its output to). It is mostly useless for "consume from Kafka and update my application database without duplicates." For that you still need an idempotent consumer with a dedup table in Postgres, exactly as above.
 
 ## The short version
 
-Stop arguing about which broker gives you exactly-once. Pick the broker for other reasons (throughput, retention, operational familiarity) and assume at-least-once delivery. Then, for every consumer:
+Stop arguing about which broker gives you exactly-once. Pick the broker for other reasons (throughput, which is how many messages it handles per second; retention, which is how long it keeps messages before deleting them; operational familiarity) and assume at-least-once delivery. Then, for every consumer:
 
 1. Identify the side effect.
 2. Identify the database that owns the side effect.
@@ -145,4 +167,4 @@ Stop arguing about which broker gives you exactly-once. Pick the broker for othe
 4. Ack the broker after the transaction commits.
 5. Tolerate replay; design the dedup table to be cheap to query at scale.
 
-Do this and you will not have to explain to a customer why you charged them twice. Skip it, and a Postgres failover, a redelivery storm, or a load balancer retrying a timed-out request will eventually arrive, and the dedup table that lived in the wrong place will fail to save you. The bug always lives in the gap between two systems pretending to coordinate. Put both writes under one commit and the gap disappears.
+Do this and you will not have to explain to a customer why you charged them twice. Skip it, and a Postgres failover, a redelivery storm, or a load balancer retrying a timed-out request will eventually arrive, and a dedup table in the wrong place will not protect you. The duplicate slips through the gap between two systems that each did their part but could not coordinate the handoff. Put both writes under one commit and there is no gap.

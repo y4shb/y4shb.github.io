@@ -1,12 +1,12 @@
 # Designing CLI subcommand hierarchies that scale past twenty verbs
 
-*the awkward middle age of an internal tool, where `--help` becomes a wall of text and nobody remembers the flag order*
+*how to reorganize a command-line tool once it has too many subcommands to scan, using a fleet management CLI as the worked example*
 
 A fleet management CLI is the tool an operations team uses to drive physical machines at scale: provision a box, reboot it, take it out of rotation, read its logs. If you have used Kubernetes, `drain` (move all work off a node and stop scheduling) and `cordon` (mark a node unschedulable) will feel familiar, except here they act on real hardware rather than pods. A fleet CLI starts out as five verbs: `provision`, `reboot`, `drain`, `status`, `logs`. Nobody writes a design doc. Somebody adds `cordon`, then `uncordon`, then `quarantine`. Six months in there are nineteen verbs, and the on-call runbook has phrases like "remember that `recover` is different from `reset`, and `restart` is just `reboot` for the BMC." The BMC, or Baseboard Management Controller, is a small management chip on the motherboard that can power-cycle the machine independently of the operating system, which is why rebooting the OS and resetting the BMC are genuinely different operations.
 
-That is the wall. Not when the tool stops working, but when new hires need to read source to figure out which verb does the thing they want. Fixing it is mostly taxonomy, partly muscle memory, and slightly a fight about whether `fleet host reboot` reads better than `fleet reboot host`.
+That is the point where the tool stops being usable by anyone new. The tool still works. But new hires have to read the source code to figure out which verb does the thing they want. Fixing it is mostly about naming and grouping, partly about not breaking people's muscle memory, and slightly a debate about whether `fleet host reboot` reads better than `fleet reboot host`.
 
-I refactored one of these recently. A tool called `flx` had grown to 34 top-level verbs over two years. The hierarchy rewrite cut new-operator discovery from "grep the help text" to "tab through the first noun." A separate change, adding aliases for the four most-used verbs, cut average command length from 47 keystrokes to 24 across a month of shell history from a small operator group. The hierarchy bought discoverability; the aliases bought brevity. Here is what worked, what didn't, and the parts I would do differently.
+I reorganized one of these recently. A tool called `flx` had grown to 34 top-level verbs over two years. The rewrite changed how a new operator finds a command: instead of searching the help text for a matching word, they press Tab to see the available groups and drill down. A separate change, adding short aliases for the four most-used verbs, cut average command length from 47 keystrokes to 24, measured across a month of shell history from a small operator group. The grouping made commands easier to find; the aliases made them shorter to type. What follows is what worked, what didn't, and the parts I would do differently.
 
 ## What flat sprawl actually looks like
 
@@ -36,7 +36,7 @@ Thirty-four verbs, no grouping, alphabetical for politeness. The problems compou
 - the help text scrolls past one screen on a 24-line terminal, so the bottom verbs are functionally invisible
 - nobody can remember whether the snapshot verb takes a hostname first or a snapshot name first, because the entire surface is positional and inconsistent
 
-The `pkg-`, `user-`, `bmc-`, `role-` prefixes are the tell. The team had already been grouping informally with hyphens, they just hadn't promoted the grouping to syntax. That is the moment to introduce a second level.
+The `pkg-`, `user-`, `bmc-`, `role-` prefixes are the giveaway. The team had already been grouping informally with hyphens, they just hadn't turned the grouping into real structure. That is the moment to introduce a second level.
 
 ## Three taxonomies, briefly
 
@@ -46,9 +46,9 @@ Before redesigning anything, pick a shape. There are three serious options, and 
 |---|---|---|---|
 | verb-first | `flx reboot host h-42` | reads like English, short for one-off actions | verbs collide across nouns (reboot host vs reboot bmc), help becomes a verb dump |
 | noun-first | `flx host reboot h-42` | groups by object, completion narrows fast, scales to hundreds of verbs | feels backwards for muscle-memory verbs (`flx host status` vs `flx status`) |
-| capability-grouped | `flx ops reboot host h-42` | clean for RBAC, where each top-level group is its own permission boundary | extra typing for every command, the top level is abstract and nobody likes guessing |
+| capability-grouped | `flx ops reboot host h-42` | clean for permissions, where each top-level group is its own permission boundary | extra typing for every command, the top level is abstract and people have to guess which group an action lives in |
 
-RBAC is Role-Based Access Control: permissions attached to roles rather than to individual users.
+Role-Based Access Control (RBAC) means permissions are attached to roles, such as "operator" or "read-only," rather than to individual users. You grant a role a set of permissions, then assign people to roles.
 
 `git` is verb-first and got away with it because the verbs are universal enough (`clone`, `commit`, `push`) that you don't fight muscle memory. It also has well over a hundred verbs across porcelain and plumbing (https://git-scm.com/docs/git) - git's high-level user-facing commands and its low-level scriptable internals - which is why `git help -a` is unreadable and why every team has a wiki page of "the seven git commands you actually need."
 
@@ -113,7 +113,7 @@ Of these signals, the noun-prefixing one is the most reliable: git, docker (`doc
 
 ## Aliases for muscle memory
 
-The hard truth about reorganizing a CLI people use every day: the on-call team will hate you for two weeks. Every command they have wired into shell history and runbooks is wrong. Aliases are how you buy goodwill.
+Reorganizing a CLI that people use every day has a real cost: for the first couple of weeks, every command the on-call team has saved in shell history and written into runbooks is now wrong. Aliases are how you soften that.
 
 Two flavors matter:
 
@@ -126,7 +126,7 @@ flx logs         -> flx host logs
 flx drain        -> flx host drain
 ```
 
-These four were ~70% of invocations in the history, and aliasing them down to a single word is where almost the whole keystroke drop came from. Muscle memory keeps working while the new hierarchy is there for everything else. You print a deprecation notice in stderr for the first month and then quietly leave them in forever, because nobody is going to retype `flx host reboot` ten times an hour when `flx reboot` works.
+These four were ~70% of invocations in the history, and aliasing them down to a single word is where almost the whole keystroke drop came from. Muscle memory keeps working while the new hierarchy is there for everything else. You print a notice that the short form is being phased out (written to standard error, the output stream meant for diagnostics, so it does not corrupt piped output) for the first month, and then you quietly leave the aliases in forever, because nobody is going to retype `flx host reboot` ten times an hour when `flx reboot` works.
 
 **Compact paths** for common drilldowns:
 
@@ -150,7 +150,7 @@ Three releases later, the legacy forms were gone. The single-word aliases (`rebo
 
 A noun-first layout only pays off if tab completion is wired correctly. Three things matter.
 
-First, **dynamic completion at every level**. Static completion that lists subcommands is table stakes, but the leaf often takes a hostname or package name, and that needs to talk to the live inventory. In the stub below, the load-bearing parts are the hidden `flx __complete` subcommand that feeds candidates from live data and the `cword` case that dispatches on cursor position (`words[1]` is the noun, `words[2]` the verb):
+First, **dynamic completion at every level**. Completion that lists the fixed subcommands is the easy part. But the final argument is often a hostname or package name, and to complete that the tool has to ask the live inventory what hosts and packages exist. In the sketch below, the load-bearing parts are the hidden `flx __complete` subcommand that feeds candidates from live data and the `cword` case that decides what to suggest based on where the cursor is (`words[1]` is the noun, `words[2]` the verb):
 
 ```bash
 # bash completion stub, the real one is generated
@@ -167,7 +167,7 @@ _flx() {
 complete -F _flx flx
 ```
 
-The `__complete` subcommand is hidden, returns whitespace-separated tokens, and caches inventory lookups for a few seconds so hitting tab repeatedly doesn't hammer the API. Without dynamic completion, the user types `flx host reboot h-` and stares at a blinking cursor, which is worse than no completion at all.
+The `__complete` subcommand is hidden, returns whitespace-separated tokens, and caches inventory lookups for a few seconds so hitting Tab repeatedly doesn't overload the inventory service. Without dynamic completion, the user types `flx host reboot h-` and stares at a blinking cursor, which is worse than no completion at all.
 
 Second, **help integration**. `flx host` with no verb should print the verbs under `host` with one-line descriptions, not error out. `flx host --help` should be the same with more detail. `flx host reboot --help` should show flags and an example. All three should work, which sounds obvious until you find a CLI where the top-level `--help` is great and `flx host --help` segfaults.
 
@@ -188,9 +188,9 @@ The restructure took about three weeks of one engineer's time, plus a week of fi
 What I'd do differently:
 
 - Ship the aliases on day one, not day fourteen. We thought we'd be fine without `flx reboot` aliasing and got loud feedback within hours.
-- Generate the completion scripts in CI from a single source of truth instead of hand-maintaining bash, zsh, and fish versions. We did this eventually but should have started there.
-- The hidden `__complete` subcommand needs a stable contract. We changed its output format once and broke completion for everyone who hadn't reinstalled the completion script. Treat it like a public API.
+- Generate the completion scripts automatically from one definition, as part of the build pipeline, instead of hand-maintaining separate bash, zsh, and fish versions. We did this eventually but should have started there.
+- The hidden `__complete` subcommand needs a stable contract. We changed its output format once and broke completion for everyone who hadn't reinstalled the completion script. Treat its output format as something other programs depend on, and don't change it casually.
 
 We scoped the RBAC grants to `noun:verb` (`host:reboot`) rather than bare verbs, so a role can be granted `host:status` without also getting `pkg:status`. That scoping is what made the noun-first tree map onto permissions cleanly, and it is why we never needed the capability-grouped layout to get clean RBAC boundaries.
 
-The keystroke halving came from aliases, not hierarchy. The hierarchy's payoff is discoverability: new hires can guess `flx host` and see what verbs exist, instead of grepping the help output for whichever verb sounds right. The CLI is no longer a closed-book exam.
+The halving of keystrokes came from the aliases, not the grouping. The grouping pays off in discoverability: new hires can guess `flx host` and see what verbs exist, instead of searching the help output for whichever verb sounds right. They no longer have to already know the answer to find the command.
