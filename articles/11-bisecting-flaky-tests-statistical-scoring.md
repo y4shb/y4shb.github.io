@@ -1,32 +1,30 @@
 # Bisecting flaky tests across thousands of runs with statistical scoring
 
-*retry budgets buy time. Ranking buys fixes*
+*how to rank flaky tests by a recency- and branch-weighted score so the worst ones get owners and a deadline*
 
-The first flake mitigation everyone ships is the same: wrap the test runner in a retry loop, set `--retries 2`, ship it. It works for a quarter. Then the green-on-second-try rate creeps from 3% to 11%, your nightly takes 90 minutes instead of 40, and someone in #ci-pain posts a graph of CPU-hours-per-merge with a question mark.
+A flaky test passes and fails on the same code without anyone changing it. Everyone's first fix is the same: wrap the runner in a retry loop, `--retries 2`. (CI is continuous integration, the system that runs your tests on every change. A nightly is a longer test run scheduled overnight. A suite is a named group of tests.) It works for a quarter. Then the share that fails once and passes on the second try (the flake rate) creeps from 3% to 11%, your nightly takes 90 minutes instead of 40, and the compute cost per merge climbs.
 
-Retries are a tax: they hide failure cost in the runner budget instead of the engineer's day. At fleet scale (tens of thousands of test executions per day across a dozen suites) the right move is to stop making individual flakes go away in-band and start *ranking* them, the way you'd rank exceptions in Sentry or slow queries in pg_stat_statements. The output isn't a green build. It's a sorted list of tests with owners, scores, and a clock ticking on quarantine.
+Retries move the cost into compute spend, where it hides. Once you run tens of thousands of test executions per day across a dozen suites, making each flake quietly disappear during the run no longer scales. The better move is to rank the flaky tests, the way you rank slow queries in a database's `pg_stat_statements` view. The output is not a green build but a sorted list of tests, each with an owner, a score, and a deadline by which it leaves the suite if unfixed. (Quarantine means moving a test out of the set that can block a merge, so it stops blocking work while it waits.)
 
-This post walks through the scoring model we landed on for a build platform called Switchyard (invented name, real lessons): how the recency and branch-context weights shake out, why naive flip-rate is a trap, and one win where a parametric fixture leak got flagged three weeks before any human noticed it on a PR.
+What follows is the scoring model we landed on for a build platform I will call Switchyard: how the recency and branch weights work, why a simple fail rate misleads, and one case where a shared-fixture leak got flagged three weeks before a human noticed it in a pull request (a PR: a change submitted for review).
 
 ## The naive metric, and why it fails
 
-The first thing anyone writes is:
+The first thing anyone writes is this:
 
 ```python
 flake_rate = (passes_after_retry) / (total_runs)
 ```
 
-This is wrong in three ways.
+It is wrong in a few ways. It does not distinguish a test that fails on `main` (the shared branch everyone merges into) from one that fails on a feature branch (a private copy someone is changing) while the author breaks it on purpose. A 30% fail rate on a PR introducing a new fixture means the test is working; the same rate on `main` is a problem.
 
-**One:** it doesn't distinguish a test that fails on main from a test that fails on a feature branch where someone is actively breaking it. A 30% fail rate on a PR that introduces a new fixture is *the test working*. The same rate on main is an emergency.
+It also weights a flake from eight months ago the same as one from this morning, so half your top-10 list is already-fixed tests on stale data.
 
-**Two:** it weights a flake from eight months ago the same as one from this morning. Half the entries on your top-10 list end up being tests that were already fixed and just have long tails of historical data.
-
-**Three:** pass-after-retry is a survivor-bias metric. The truly nasty flakes fail, fail, fail, and then get marked "infra error" by a tired engineer who restarted the runner; once relabeled, a failure is no longer a pass-after-retry, so it never lands in your numerator and the metric understates the flakes that did the most damage. (Fixed in the tuning notes, by pulling `error` outcomes into the numerator.)
+And pass-after-retry only counts the flakes that eventually went green: a survivor-bias metric. The truly nasty ones fail repeatedly, then get marked "infra error" by whoever restarted the runner. Once relabeled, that failure never lands in the numerator (the top of the fraction, the count we divide), so the metric undercounts the worst offenders. We fix this later by pulling `error` outcomes into the numerator.
 
 ## The scoring function
 
-Here's the shape we landed on. Per-test, per-day, recomputed nightly from the run history table:
+Computed per test per day, recomputed nightly from the run-history table:
 
 ```python
 import math
@@ -74,19 +72,17 @@ def flake_score(runs, now=None):
     return weighted_fail / (weighted_total + LAPLACE_ALPHA)
 ```
 
-Four design choices in there worth defending out loud.
+The recency weight decays exponentially with a 14-day half-life: the time for a failure's weight to drop by half, so a failure today counts about 32 times as much as one ten weeks ago. The half-life is tunable. Linear decay, tried first, kept surfacing tests broken once and long fixed.
 
-**Exponential recency decay with a 14-day half-life.** A failure today counts ~32x one from ten weeks ago. The half-life is tunable; 14 days matched our "is this still happening?" intuition. Linear decay, tried first, produced a scoreboard dominated by tests broken once, badly, in March.
+Failures on `main` are weighted 3 times more than failures on a PR: a flake on `main` is seen by every PR built on top of it, one on a PR branch mostly by its author. The 3x came from rough cost accounting; the direction matters, not the number.
 
-**Main weighted 3x over PRs.** A flake on main is observed by every PR rebased on top of it; a flake on a single PR branch is mostly observed by the one author. The 3x came from rough cost accounting (mean PRs touching main per day), not first principles. The number isn't sacred; the direction is.
+We skip runs where the commit changed the test file: the cheapest improvement, a check of which files the change touched. When a commit edits the test itself, a pass-to-fail flip is a real change, not flakiness, and counting it adds false positives.
 
-**Skip runs where the commit touched the test file.** The single cheapest improvement: a diff check on the test path, no reruns. A flaky test is, by definition, one that both passes and fails on the *same* code. When a commit edits the test file, a pass-to-fail flip is a legitimate change, not flakiness, so counting it only adds false positives. Without this filter the top of the list is dominated by tests under active development; with it, the list cleanly separates "infra-shaped sadness" from "someone is mid-refactor."
+We apply Laplace smoothing. With few data points a raw rate is too confident: a new test that fails once on a PR would otherwise score 50% and top the list. Smoothing nudges the score toward a starting assumption (a "prior") before evidence piles up; here the prior is zero flakiness, and the `alpha=2.0` added to the denominator does the nudging. The goal is the same as the [Wilson-score lower bound used for Reddit comment ranking](https://medium.com/hacking-and-gonzo/how-reddit-ranking-algorithms-work-ef111e33d0d9): rank each item by the low end of a confidence range, not its raw rate, so a test with few observations cannot outrank one with a long record.
 
-**Laplace smoothing.** With few data points a raw rate is wildly overconfident, so we pull it toward a prior of zero flakiness until evidence accumulates; without the pull, a brand-new test that fails once on PR ranks #1 forever. The `alpha=2.0` added to the denominator does the pulling, and it is deliberately one-sided: we add nothing to the numerator, because the prior we want is *zero* flakiness, not the symmetric 0.5 that textbook additive smoothing would give. (Same spirit as Wilson-score lower bounds, used for [Reddit comment ranking](https://medium.com/hacking-and-gonzo/how-reddit-ranking-algorithms-work-ef111e33d0d9).)
+The action is "ping the owner of test #1," so ranking order is what matters, not a number meaningful on its own. So we skip heavier statistics: no p-values, no confidence intervals, no full Bayesian model (all three are ways of expressing how sure you are about a measured rate).
 
-The goal is *ordinal correctness* (right ranking order), not a *calibrated probability* (an absolute flake number trustworthy on its own). The downstream action is "page the owner of test #1," so order is what matters, which is why we skip the heavier machinery: no p-values, no confidence intervals, no Bayesian beta-binomial. The one-sided Laplace term already keeps a 1/2 from outranking a 400/1000.
-
-One side effect: the fixed 2.0 in the denominator structurally caps a low-traffic test below a high-traffic one. A test with a recent weighted total of only ~3 to 4 maxes out around 0.6 to 0.7 even at 100% recent failure, while a heavily-run test approaches 1.0. That cap is the price of not trusting thin evidence.
+A side effect: the fixed 2.0 caps a low-traffic test below a high-traffic one. That is the price of not over-trusting thin evidence.
 
 ## The pipeline shape
 
@@ -100,13 +96,15 @@ flowchart TD
     top --> dash["dashboard panel<br/>(Grafana, top 20<br/>with sparkline)"]
 ```
 
-The 90-day window matters because recency decay does the right thing inside it without paying storage and scan cost on years of data. A test that hasn't run in 90 days is either dead or in a suite no one runs; either way, the scorer shouldn't think about it.
+A cron is a scheduled job; this one runs nightly in UTC (Coordinated Universal Time, the timezone-neutral clock). The scorer reads the run history with one query and processes it in memory with pandas, a Python data library. The dashboard runs on Grafana, a charts-and-panels tool; each test gets a sparkline, a tiny inline trend chart. SLO stands for service level objective, a target the team commits to: a flaky test above the threshold for three days gets quarantined automatically.
+
+The 90-day window lets recency decay work without storing years of data. A test that has not run in 90 days is dead, and the scorer ignores it.
 
 ## Owners, SLOs, and the quarantine bot
 
-A score with no owner is theater. The pipeline does a CODEOWNERS lookup on the test file path, falls back to the suite owner, then to a #flake-jail rotation if both miss. The bot opens a single tracking issue per (test, owner) and re-comments daily with the score and a sparkline. No new issue per day; that's how you avoid training people to mute the bot.
+A score is useless without someone responsible for it. The pipeline looks up the test path in CODEOWNERS (a repository file mapping paths to people), falls back to the suite owner, then a shared rotation. The bot opens one tracking issue per (test, owner) pair and re-comments daily with the score and a sparkline rather than opening a new one, which keeps people from muting it.
 
-The quarantine SLO walks a test through four states. Note the two transitions a table can't show: a quarantined test under the fix-or-delete clock loops back to Watching if the owner links a fix, and Warning advances to Quarantined either when the bot's PR merges or after 7 days.
+The quarantine SLO walks a test through four states (a state machine: states with defined rules for moving between them, one move per arrow). Two moves do not fit the table cleanly and are in the diagram below.
 
 ```mermaid
 stateDiagram-v2
@@ -125,17 +123,17 @@ stateDiagram-v2
 | Quarantined (quarantine PR merged or 7 days elapsed) | test moved to `@pytest.mark.flaky_quarantine`, excluded from required checks |
 | Fix-or-delete (quarantined for 30 days) | bot opens a deletion PR; owner can reject by linking a fix PR |
 
-The 30-day fix-or-delete is what makes the whole system work. Without it, quarantine is a graveyard with no eviction policy and the suite slowly rots. Every flake-tracker I've seen without an automatic deletion clock ends up the same: 200 quarantined tests, half irrelevant, no one knows which.
+The 30-day fix-or-delete step makes the system work. Every flake-tracker I have seen without an automatic deletion deadline ends with a few hundred quarantined tests, half no longer relevant and no one sure which.
 
 ## The fixture-leaking parametric: a worked example
 
-A test called `test_billing_rollup[currency-USD-window-7d]` showed up at score 0.18 in mid-April, one of 84 parametrizations of the same test function. The bot put it in the Watching list. Owner glanced, shrugged, no PR.
+A test called `test_billing_rollup[currency-USD-window-7d]` showed up at score 0.18 in mid-April, one of 84 variants of the same function. (pytest, the Python test framework, lets you run one function against many input sets and treats each as its own test; this is parametrization, each variant a "param.") The bot put it in the Watching list; the owner saw nothing urgent and moved on.
 
-By early May the parent test crossed an *aggregated* score of 0.42. The rule is simple: the parent score is `flake_score()` run over the union of all 84 params' runs, not a sum or max of per-param scores. Pooling is what surfaces a defect spread thin across many parametrizations. The Warning threshold tripped on May 6 and the bot opened a quarantine PR with score history attached.
+By early May the parent test crossed a combined score of 0.42. Each param is a separate test, and the parent score is `flake_score()` over all 84 params' runs pooled, not a sum or max of per-param scores; pooling surfaces a single defect spread thinly across variants. The Warning threshold tripped on May 6 and the bot opened a quarantine PR.
 
-What was actually broken needs a little pytest background. pytest-xdist runs your suite across several worker processes in parallel. A *session-scoped* fixture is built once per worker; a *function-scoped* fixture is rebuilt fresh for each test. Here, a session-scoped fixture `_warehouse_seed` was mutated by an early param (`currency-EUR-window-1h`), which inserted a row into a shared database that a later param assumed wasn't there. The mutation went to a real DB, not in-memory fixture state, so it crossed process boundaries; one test could poison another even on a different worker.
+The bug needs pytest background. The pytest-xdist plugin runs your suite across several worker processes at once. (Concurrency means more than one thing running at the same time; a worker is one of those processes.) A pytest fixture is shared setup-and-cleanup code tests depend on; a session-scoped fixture is built once per worker and reused, a function-scoped fixture fresh for each test. Here, a session-scoped fixture `_warehouse_seed` inserted a row into a shared database during an early param (`currency-EUR-window-1h`) that a later param assumed was not there. The write crossed process boundaries: this is shared mutable state, data more than one test can read and write, the usual root of this kind of bug.
 
-The default xdist scheduler, `--dist load`, hands individual test items to whichever worker is free next, so the *relative* order of two tests across workers is not fixed ([xdist known limitations](https://pytest-xdist.readthedocs.io/en/stable/known-limitations.html)). The failure surfaces only when the mutating param commits its write before the dependent param reads:
+The default xdist scheduler, `--dist load`, hands each test to whichever worker is free next, so the order of two tests across workers is not fixed ([xdist known limitations](https://pytest-xdist.readthedocs.io/en/stable/known-limitations.html)). The failure shows up only when the writing param commits before the reading param checks:
 
 ```mermaid
 sequenceDiagram
@@ -150,15 +148,13 @@ sequenceDiagram
     Note over W2: assertion fails
 ```
 
-With more workers picking work in effectively random order, the number of interleavings grows and the bad ordering gets likelier: rare on the 4-worker CI run, several times more frequent on the 16-worker nightly.
+The number of orderings of parallel work grows with the number of workers, so the bad ordering gets likelier the more you run: rare on the 4-worker CI run, several times as frequent on the 16-worker nightly.
 
-Three observations:
+No human had noticed it alone: it looked like one bad param among 84, and engineers reading CI logs clicked retry. Pooling all 84 params with recency weight surfaced the trend. The fix was nearly one line and took 40 minutes: scoping the fixture to `function`, plus a missing `db.rollback()`. Three weeks of pointless retries was the expensive part.
 
-1. **No human had noticed.** It looked like one bad param among 84, and engineers eyeballing CI logs at the function level saw "one red dot among many" and retried. Pooling 84 params with recency weight is what surfaced the trend.
-2. **The fix took 40 minutes.** A one-line change to scope the fixture to `function` instead of `session`, plus a missing `db.rollback()`. The expensive part was three weeks of false-retries before someone looked.
-3. **The bisection was nearly free.** Because we kept per-(test, run, worker_id) outcome history, the owner could pivot the dashboard by worker count and watch the failure rate climb with parallelism, pointing straight at a concurrency or shared-resource problem without a `git bisect`.
+The bisection was also nearly free. Because we kept per-(test, run, worker_id) outcome history, the owner could pivot the dashboard by worker count and watch the failure rate climb with parallelism, pointing at a concurrency problem with no `git bisect` (which binary-searches commits to find the one that broke something).
 
-That last point is what most flake-trackers miss. Storing only test-level pass/fail loses the dimensions that make root-cause obvious. The worker-count pivot localizes the failure to a *condition* (high parallelism); `git bisect` localizes a regression to a *commit*. Different questions. The pivot gave us a strong hypothesis and let us skip bisect, though we still had to find the specific shared mutable state. The minimum schema:
+Storing only test-level pass/fail loses the dimensions that make the cause obvious. The worker-count pivot narrows a failure to a condition (high parallelism); `git bisect` narrows a regression (a change that broke something that used to work) to a commit. The pivot gave us a strong hypothesis and let us skip bisect, though we still had to find the leak by hand. The minimum schema:
 
 ```sql
 CREATE TABLE test_run (
@@ -181,23 +177,23 @@ CREATE INDEX ON test_run (test_id, ts DESC);
 CREATE INDEX ON test_run (suite, ts DESC) WHERE branch_kind = 'main';
 ```
 
-A partial index physically stores only the rows matching its `WHERE` predicate, so the main-branch index stays as small as main traffic is relative to everything else. The scorer's per-test hot path uses `(test_id, ts DESC)`, whose key order lets the planner read each test's recent runs as a contiguous range and group without a giant sort. The dashboard's top-N-per-suite query uses the partial `(suite, ts DESC)` index: predicate shrinks the working set, leading key columns turn each scan into a range read. Together they get you under a second on a few hundred million rows.
+(`UUID` is a unique identifier type; `TIMESTAMPTZ` is a timestamp with a timezone; `nodeid` is pytest's internal name for a test, including its params.) An index keeps its rows in sorted order, so a lookup on the sorted key columns becomes a range read instead of a scan of the whole table. The scorer's hot-path index `(test_id, ts DESC)` groups each test's runs time-sorted on disk, so the query planner (the part of the database that decides how to fetch data) reads one test's recent runs as a contiguous block and never sorts them. The dashboard's top-N-per-suite query uses the partial `(suite, ts DESC)` index the same way; a partial index stores only the rows matching its `WHERE` condition, so the main-branch index stays as small as main traffic. Together they stay under a second on hundreds of millions of rows.
 
 ## What the scorer cannot do
 
-It can't tell you *why* a test is flaky; it can rank, route, and put a clock on it. The "why" is still a human bisect, a `pytest --count=50`, a strace if you're unlucky.
+It cannot tell you why a test is flaky; it only ranks, routes, and puts a deadline on it. The "why" is still a human investigation: a `git bisect`, a `pytest --count=50` to run a test 50 times and watch it fail, sometimes an `strace` (a Linux tool recording a program's system calls).
 
-It can't catch a flake that fails identically every time but in a way the framework counts as a pass: async tests that never await the assertion, logging-only assertions, tests that swallow exceptions in a fixture teardown. The model assumes the runner correctly distinguishes pass from fail; if that's broken, fix it upstream before tuning weights.
+It cannot catch a flake that fails the same way every time but in a way the framework counts as a pass: async tests that never `await` the assertion (in Python, `async`/`await` mark code that can pause and resume), assertions that only log instead of failing, tests that swallow exceptions during cleanup. The model assumes the runner correctly tells pass from fail; if that is broken, fix it first.
 
-It can't fix the cultural problem where engineers see a red CI and click "rerun" without reading the log. The bot helps (the owner gets pinged whether or not the rerun goes green), but the habit needs the SLO and auto-deletion to make consequences visible.
+It cannot fix the habit where engineers see a red CI and click "rerun" without reading the log. The bot helps, since the owner gets pinged whether or not the rerun goes green, but the habit changes only once the deadline makes the consequences visible.
 
 ## Tuning notes from running this for a year
 
 A few things we changed after the first version:
 
-- **Dropped `error` from the flake numerator briefly, added it back.** OOM kills and runner-vanished events looked like infra noise. They are. But they correlate strongly with specific test patterns (memory hogs, fixtures that fork subprocesses), and surfacing them to test owners produced more fixes than routing them only to the platform team did. This also reclaims the flakes relabeled as "infra error": counting `error` in the numerator stops the worst offenders hiding outside the count.
-- **Per-suite thresholds, not global.** The integration suite runs at 5x the flake rate of unit tests because it talks to a real database. A 0.30 threshold there is noise; we use 0.45. Unit tests use 0.20. The `QUARANTINE_THRESHOLD` constant above is the default; production overrides it per suite.
-- **Sparkline in the daily comment.** A number is forgettable. A 30-day sparkline showing "this used to be 0.05, now it's 0.31" changes how owners read the issue. Cheap to generate, high signal.
-- **Exclude the first 7 days of a test's life from quarantine.** New tests are bumpy. The grace period keeps the bot from playing whack-a-mole on tests still settling in.
+- We dropped `error` from the numerator briefly, then added it back. Out-of-memory kills (the operating system terminating a process for using too much memory) and runner-vanished events look like infrastructure noise, but they correlate strongly with specific test patterns (memory hogs, fixtures that fork subprocesses), and surfacing them to owners produced more fixes than routing them only to the platform team. It also reclaims flakes relabeled "infra error."
+- We use per-suite thresholds, not one global one. The integration suite runs at 5 times the flake rate of unit tests because it talks to a real database, so 0.30 there is just noise; we use 0.45 there, 0.20 for unit tests. The `QUARANTINE_THRESHOLD` constant above is the default, overridden per suite.
+- We added a sparkline to the daily comment. A bare number is forgettable; a 30-day sparkline showing "this used to be 0.05, now it is 0.31" changes how owners read the issue, and it is cheap.
+- We exclude a test's first 7 days from quarantine. New tests are bumpy, and the grace period keeps the bot from chasing ones still settling.
 
-Flake scoring is not glamorous infrastructure. It is closer to a small piece of accounting, and the accounting is what turns "CI is flaky" (which everyone agrees on and no one owns) into "test X is at 0.42 and owner Y has 6 days." That second sentence is fixable.
+The accounting is what turns "CI is flaky," which everyone agrees on and no one owns, into "test X is at 0.42 and owner Y has 6 days," a sentence you can act on.

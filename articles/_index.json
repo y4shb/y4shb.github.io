@@ -13,7 +13,7 @@
         "fleet",
         "agents"
       ],
-      "readMin": 15,
+      "readMin": 16,
       "enabled": true
     },
     {
@@ -27,7 +27,7 @@
         "reliability",
         "hardware"
       ],
-      "readMin": 15,
+      "readMin": 16,
       "enabled": true
     },
     {
@@ -41,7 +41,7 @@
         "observability",
         "healthchecks"
       ],
-      "readMin": 11,
+      "readMin": 13,
       "enabled": true
     },
     {
@@ -56,7 +56,7 @@
         "idempotency",
         "control-plane"
       ],
-      "readMin": 14,
+      "readMin": 15,
       "enabled": true
     },
     {
@@ -70,7 +70,7 @@
         "jobs",
         "state-machines"
       ],
-      "readMin": 12,
+      "readMin": 13,
       "enabled": true
     },
     {
@@ -85,7 +85,7 @@
         "logs",
         "http"
       ],
-      "readMin": 13,
+      "readMin": 14,
       "enabled": true
     },
     {
@@ -115,7 +115,7 @@
         "ras",
         "alerting"
       ],
-      "readMin": 14,
+      "readMin": 15,
       "enabled": true
     },
     {
@@ -130,7 +130,7 @@
         "kafka",
         "scaling"
       ],
-      "readMin": 13,
+      "readMin": 14,
       "enabled": true
     },
     {
@@ -145,7 +145,7 @@
         "shutdown",
         "signals"
       ],
-      "readMin": 12,
+      "readMin": 13,
       "enabled": true
     },
     {
@@ -160,7 +160,7 @@
         "flakes",
         "ci"
       ],
-      "readMin": 9,
+      "readMin": 10,
       "enabled": true
     },
     {
@@ -175,7 +175,7 @@
         "databases",
         "schema"
       ],
-      "readMin": 11,
+      "readMin": 12,
       "enabled": true
     },
     {
@@ -190,7 +190,7 @@
         "latency",
         "deadlines"
       ],
-      "readMin": 10,
+      "readMin": 12,
       "enabled": true
     },
     {
@@ -205,7 +205,7 @@
         "performance",
         "limits"
       ],
-      "readMin": 10,
+      "readMin": 11,
       "enabled": true
     },
     {
@@ -279,7 +279,7 @@
         "load-testing",
         "performance"
       ],
-      "readMin": 9,
+      "readMin": 10,
       "enabled": true
     },
     {
@@ -294,7 +294,7 @@
         "alerting",
         "sre"
       ],
-      "readMin": 12,
+      "readMin": 13,
       "enabled": true
     }
   ]

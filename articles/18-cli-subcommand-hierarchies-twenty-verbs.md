@@ -4,9 +4,9 @@
 
 A fleet management CLI is the tool an operations team uses to drive physical machines at scale: provision a box, reboot it, take it out of rotation, read its logs. If you have used Kubernetes, `drain` (move all work off a node and stop scheduling) and `cordon` (mark a node unschedulable) will feel familiar, except here they act on real hardware rather than pods. A fleet CLI starts out as five verbs: `provision`, `reboot`, `drain`, `status`, `logs`. Nobody writes a design doc. Somebody adds `cordon`, then `uncordon`, then `quarantine`. Six months in there are nineteen verbs, and the on-call runbook has phrases like "remember that `recover` is different from `reset`, and `restart` is just `reboot` for the BMC." The BMC, or Baseboard Management Controller, is a small management chip on the motherboard that can power-cycle the machine independently of the operating system, which is why rebooting the OS and resetting the BMC are genuinely different operations.
 
-That is the point where the tool stops being usable by anyone new. The tool still works. But new hires have to read the source code to figure out which verb does the thing they want. Fixing it is mostly about naming and grouping, partly about not breaking people's muscle memory, and slightly a debate about whether `fleet host reboot` reads better than `fleet reboot host`.
+That is the point where the tool stops being usable by anyone new: it still works, but new hires have to read the source code to figure out which verb does the thing they want. Fixing it is mostly about naming and grouping, partly about not breaking people's muscle memory, and slightly a debate about whether `fleet host reboot` reads better than `fleet reboot host`.
 
-I reorganized one of these recently. A tool called `flx` had grown to 34 top-level verbs over two years. The rewrite changed how a new operator finds a command: instead of searching the help text for a matching word, they press Tab to see the available groups and drill down. A separate change, adding short aliases for the four most-used verbs, cut average command length from 47 keystrokes to 24, measured across a month of shell history from a small operator group. The grouping made commands easier to find; the aliases made them shorter to type. What follows is what worked, what didn't, and the parts I would do differently.
+I reorganized one of these recently. A tool called `flx` had grown to 34 top-level verbs over two years. The rewrite changed how a new operator finds a command: instead of searching the help text for a matching word, they press Tab to see the available groups and drill down. A separate change, adding short aliases for the four most-used verbs, cut average command length from 47 keystrokes to 24, measured across a month of shell history from a small operator group. What follows is what worked, what didn't, and the parts I would do differently.
 
 ## What flat sprawl actually looks like
 
@@ -28,7 +28,7 @@ COMMANDS:
   diff           snapshot
 ```
 
-Thirty-four verbs, no grouping, alphabetical for politeness. The problems compound:
+Thirty-four verbs, no grouping, sorted alphabetically. The problems compound:
 
 - `reboot` and `restart` and `bmc-reset` overlap in a way only the original author understood
 - `pkg-*` and `user-*` and `bmc-*` and `role-*` are clearly noun prefixes pretending to be verbs
@@ -36,7 +36,7 @@ Thirty-four verbs, no grouping, alphabetical for politeness. The problems compou
 - the help text scrolls past one screen on a 24-line terminal, so the bottom verbs are functionally invisible
 - nobody can remember whether the snapshot verb takes a hostname first or a snapshot name first, because the entire surface is positional and inconsistent
 
-The `pkg-`, `user-`, `bmc-`, `role-` prefixes are the giveaway. The team had already been grouping informally with hyphens, they just hadn't turned the grouping into real structure. That is the moment to introduce a second level.
+The `pkg-`, `user-`, `bmc-`, `role-` prefixes are the giveaway: the team had already been grouping informally with hyphens without turning it into real structure. That is the moment to introduce a second level.
 
 ## Three taxonomies, briefly
 
@@ -52,11 +52,11 @@ Role-Based Access Control (RBAC) means permissions are attached to roles, such a
 
 `git` is verb-first and got away with it because the verbs are universal enough (`clone`, `commit`, `push`) that you don't fight muscle memory. It also has well over a hundred verbs across porcelain and plumbing (https://git-scm.com/docs/git) - git's high-level user-facing commands and its low-level scriptable internals - which is why `git help -a` is unreadable and why every team has a wiki page of "the seven git commands you actually need."
 
-`kubectl` is verb-first at the top (`get`, `describe`, `apply`, `delete`) but the noun comes second and is required (`kubectl get pods`), with a few noun-first exceptions like `kubectl rollout` and `kubectl config`. It holds up because the verbs are the narrow axis and the nouns are the wide one: users add their own resource types through Custom Resource Definitions (CRDs), so the noun set grows without the tool changing. By the rule above, that wide axis belongs second, and it does.
+`kubectl` is verb-first at the top (`get`, `describe`, `apply`, `delete`) but the noun comes second and is required (`kubectl get pods`), with a few noun-first exceptions like `kubectl rollout` and `kubectl config`. It holds up because the verbs are the narrow axis and the nouns are the wide one: users can register their own object types, called Custom Resource Definitions (CRDs) - a way to teach Kubernetes about a new kind of object so that `kubectl` manages it like a built-in one - so the noun set grows without the tool changing.
 
-`aws` and `gcloud` group by service noun first (`aws ec2 ...`, `gcloud compute instances ...`), though individual operations are themselves verb-noun (`describe-instances` (https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instances.html), `instances list`). With hundreds of nouns and thousands of leaf commands the nouns are overwhelmingly the wide axis, so by the rule they go first. kubectl is the useful counterexample: noun-first is a strong convention, not a law.
+`aws` and `gcloud` group by service noun first (`aws ec2 ...`, `gcloud compute instances ...`), though individual operations are themselves verb-noun (`describe-instances` (https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instances.html), `instances list`). With hundreds of nouns and thousands of leaf commands the nouns are overwhelmingly the wide axis. kubectl is the useful counterexample: noun-first is a strong convention, not a law.
 
-For fleet management the same rule picks noun-first: 34 verbs against roughly 6 candidate nouns, so the verbs are the wide axis and belong second. Bucketing 34 verbs under ~6 nouns turns one unscannable flat list into a handful of short ones. The actions also cluster naturally by what they act on, and the verbs are not universal: `drain` means something specific to a host, `pin` means something specific to a package version, and pretending they are general verbs invites collisions.
+For fleet management the same rule picks noun-first: 34 verbs against roughly 6 candidate nouns, so the verbs are the wide axis and belong second. The actions also cluster naturally by what they act on, and the verbs are not universal: `drain` means something specific to a host, `pin` means something specific to a package version, and pretending they are general verbs invites collisions.
 
 ## The target shape
 
@@ -78,12 +78,12 @@ flx host reboot h-42
 flx host drain h-42
 flx host status h-42
 flx host logs h-42 --since 10m
-flx host quarantine h-42 --reason "PSU flapping"
+flx host quarantine h-42 --reason "power supply flapping"
 
 flx pkg install firmware-bmc-1.4.2 --to h-42
 flx pkg list --installed --on h-42
 flx pkg pin firmware-bmc-1.4.2 --on h-42
-flx pkg diff h-42 h-43
+flx pkg diff h-42 h-43     # compare the installed packages on two hosts
 
 flx access user add alice --role operator
 flx access role grant operator host:reboot,host:drain
@@ -93,9 +93,9 @@ flx ops snapshot create --tag pre-upgrade
 flx ops export inventory --format json
 ```
 
-The verbs that did the same thing under different names (`reboot`, `restart`, `bmc-reset`) collapsed into `flx host reboot` with a `--target {os,bmc}` flag, default `os`. The three old verbs were one action (power-cycle) aimed at two targets, the OS or the management chip, and `os` is what operators mean almost every time. The verbs that were noun-prefix masquerades (`pkg-install`, `user-add`) lost the prefix and became proper subcommands. The catch-all verbs (`describe`, `inspect`) merged into `status` with verbosity flags.
+The verbs that did the same thing under different names (`reboot`, `restart`, `bmc-reset`) collapsed into `flx host reboot` with a `--target {os,bmc}` flag, default `os` - one power-cycle action aimed at two targets, and `os` is what operators mean almost every time. The verbs that were noun-prefix masquerades (`pkg-install`, `user-add`) lost the prefix and became proper subcommands. The catch-all verbs (`describe`, `inspect`) merged into `status` with verbosity flags.
 
-Total verb count under the new tree: still 34. Conservation of complexity is real. But they split roughly as host ~12, pkg ~9, access ~8, ops ~5, so each noun's `--help` now shows a screen-sized list, and tab completion at the first level offers four options instead of thirty-four.
+The total verb count under the new tree is still 34: the work was redistributed, not removed. But the verbs split roughly as host ~12, pkg ~9, access ~8, ops ~5, so each noun's `--help` now shows a screen-sized list, and tab completion at the first level offers four options instead of thirty-four.
 
 ## When to introduce the second level
 
@@ -107,15 +107,15 @@ The rule I use: introduce a noun layer when any of the following is true.
 - You want RBAC boundaries that map cleanly to subtrees (read-only users get `host status` and `host logs` but not `host *`).
 - Tab completion at the top level returns enough options that users ignore it and type the verb from memory.
 
-Fewer than 12 verbs and you're better off staying flat. The second level adds typing for everyone in exchange for organization that doesn't pay off at small scale. `cat`, `ls`, `grep` are flat and will be flat forever, correctly.
+Fewer than 12 verbs and you're better off staying flat. The second level adds typing for everyone in exchange for organization that doesn't pay off at small scale. `cat`, `ls`, `grep` are flat and should stay flat.
 
-Of these signals, the noun-prefixing one is the most reliable: git, docker (`docker rm` becoming `docker container rm`), kubectl, and aws all evolved hyphen-or-prefix conventions into real subcommand syntax. The "12-15 verbs / one screen" threshold is my own rule of thumb, so treat the number as a nudge. The more honest signal is when you find yourself writing internal docs that say "to do X, run `flx foo`; not to be confused with `flx bar` which is similar but different." That sentence means you needed the noun layer two verbs ago.
+Of these signals, the noun-prefixing one is the most reliable: git, docker (`docker rm` becoming `docker container rm`), kubectl, and aws all evolved hyphen-or-prefix conventions into real subcommand syntax. The "12-15 verbs / one screen" threshold is my own rule of thumb, so treat the number as a nudge. The more honest signal is when you find yourself writing internal docs that say "to do X, run `flx foo`; not to be confused with `flx bar` which is similar but different." You needed the noun layer a couple of verbs ago.
 
 ## Aliases for muscle memory
 
-Reorganizing a CLI that people use every day has a real cost: for the first couple of weeks, every command the on-call team has saved in shell history and written into runbooks is now wrong. Aliases are how you soften that.
+Reorganizing a CLI that people use every day has a real cost: for the first couple of weeks, every command the on-call team has saved in shell history and written into runbooks is now wrong.
 
-Two flavors matter:
+Two flavors of alias matter:
 
 **Top-level shortcuts** for the verbs that account for the bulk of daily use. Track shell history for a week and ship a config:
 
@@ -126,7 +126,7 @@ flx logs         -> flx host logs
 flx drain        -> flx host drain
 ```
 
-These four were ~70% of invocations in the history, and aliasing them down to a single word is where almost the whole keystroke drop came from. Muscle memory keeps working while the new hierarchy is there for everything else. You print a notice that the short form is being phased out (written to standard error, the output stream meant for diagnostics, so it does not corrupt piped output) for the first month, and then you quietly leave the aliases in forever, because nobody is going to retype `flx host reboot` ten times an hour when `flx reboot` works.
+These four were ~70% of invocations in the history, and aliasing them down to a single word is where almost the whole keystroke drop came from. Muscle memory keeps working while the new hierarchy is there for everything else. You print a notice that the short form is being phased out (written to standard error, the output stream meant for diagnostics, so it does not corrupt piped output) for the first month, and then you quietly leave the aliases in forever.
 
 **Compact paths** for common drilldowns:
 
@@ -156,9 +156,12 @@ First, **dynamic completion at every level**. Completion that lists the fixed su
 # bash completion stub, the real one is generated
 # real implementation uses null-separated output and `mapfile` to handle spaces in names
 _flx() {
+  # _init_completion is a bash-completion helper that fills in cur/prev/words/cword:
+  #   cur = the word being typed, words = all words so far, cword = its index
   local cur prev words cword
   _init_completion || return
   case "$cword" in
+    # compgen -W "list..." filters a fixed word list down to what matches cur
     1) COMPREPLY=($(compgen -W "host pkg access ops" -- "$cur")) ;;
     2) COMPREPLY=($(compgen -W "$(flx __complete verbs ${words[1]})" -- "$cur")) ;;
     *) COMPREPLY=($(compgen -W "$(flx __complete args ${words[1]} ${words[2]})" -- "$cur")) ;;
@@ -167,7 +170,7 @@ _flx() {
 complete -F _flx flx
 ```
 
-The `__complete` subcommand is hidden, returns whitespace-separated tokens, and caches inventory lookups for a few seconds so hitting Tab repeatedly doesn't overload the inventory service. Without dynamic completion, the user types `flx host reboot h-` and stares at a blinking cursor, which is worse than no completion at all.
+The `__complete` subcommand is hidden, returns whitespace-separated tokens, and caches inventory lookups for a few seconds so hitting Tab repeatedly doesn't overload the inventory service. Without it, the user types `flx host reboot h-` and stares at a blinking cursor.
 
 Second, **help integration**. `flx host` with no verb should print the verbs under `host` with one-line descriptions, not error out. `flx host --help` should be the same with more detail. `flx host reboot --help` should show flags and an example. All three should work, which sounds obvious until you find a CLI where the top-level `--help` is great and `flx host --help` segfaults.
 
@@ -179,7 +182,7 @@ error: 'rebot' is not a valid verb under 'host'
 did you mean: reboot? (run 'flx host --help' for a list)
 ```
 
-A Damerau-Levenshtein distance of 2 or less is a common cutoff. Edit distance is the minimum number of single-character inserts, deletes, and substitutions to turn one string into another; the Damerau variant also counts a swap of two adjacent characters as one edit, so it catches a deletion like `rebot` cheaply. Don't auto-correct, just suggest, which matches the conservative default git uses - auto-correction across destructive verbs is how you reboot the wrong fleet.
+A Damerau-Levenshtein distance of 2 or less is a common cutoff. Edit distance is the minimum number of single-character inserts, deletes, and substitutions to turn one string into another; the Damerau variant also counts a swap of two adjacent characters as one edit, so it catches a deletion like `rebot` cheaply. Don't auto-correct, just suggest: auto-correcting a destructive verb can power-cycle the wrong machines.
 
 ## The migration cost, honestly
 
