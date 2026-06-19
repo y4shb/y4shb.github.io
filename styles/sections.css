@@ -106,39 +106,9 @@ a.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; b
 .proj-tags { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .proj-tags li { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 3px 7px; }
 
-.proj-tier2-label { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin-bottom: 14px; }
-.proj-tier2 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-.proj-mini {
-  border: 1px solid var(--border); border-radius: 6px; padding: 16px 18px;
-  display: flex; flex-direction: column; gap: 6px;
-  transition: border-color 150ms var(--ease-out), transform 150ms var(--ease-out);
-}
-.proj-mini:hover { border-color: var(--accent); transform: translateY(-2px); }
-.proj-mini-name { font-size: 14px; font-weight: 500; }
-.proj-mini-arrow { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
-/* placeholder slots: real demos to be rebuilt in the new design */
-.proj-mini--soon { cursor: default; border-color: var(--border); background: color-mix(in srgb, var(--surface) 40%, transparent); }
-.proj-mini--soon:hover { transform: none; border-color: var(--border); }
-.proj-mini--soon .proj-mini-name { color: var(--faint); }
-.proj-mini-status {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--faint);
-}
-.proj-mini-dot {
-  width: 5px; height: 5px; border-radius: 50%; background: var(--faint);
-  animation: tier2-pulse 2.8s ease-in-out infinite;
-}
-@keyframes tier2-pulse { 0%,100%{opacity:0.9} 50%{opacity:0.3} }
-@media (prefers-reduced-motion: reduce) {
-  .proj-mini-dot { animation: none; }
-}
-.proj-tier2-note { color: var(--faint); text-transform: none; letter-spacing: 0; margin-left: 8px; font-style: italic; }
-
 /* ============ RESPONSIVE ============ */
 @media (max-width: 900px) {
   .proj-tier1 { grid-template-columns: repeat(2, 1fr); }
-  .proj-tier2 { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 768px) {
   /* minmax(0,1fr) lets the track shrink past min-content; without this the 1fr
@@ -154,9 +124,6 @@ a.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; b
 }
 @media (max-width: 600px) {
   .proj-tier1 { grid-template-columns: 1fr; }
-}
-@media (max-width: 480px) {
-  .proj-tier2 { grid-template-columns: 1fr; }
 }
 
 /* ----- CLS guards (invisible until/unless hydration is slow) ----- */
